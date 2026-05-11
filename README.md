@@ -36,13 +36,6 @@ volsync-webui/
 │   │       ├── snapshot_list.rs # Snapshot table
 │   │       └── namespace.rs     # Namespace selector
 │   └── index.html        # HTML shell
-├── kube-manifests/       # Kubernetes YAML manifests
-│   ├── 00-namespace-rbac.yaml   # Namespace, ServiceAccount, ClusterRole
-│   ├── 01-clusterrolebinding.yaml
-│   ├── 02-deployment.yaml       # Deployment with probes
-│   └── 03-service.yaml
-├── helm-charts/         # Helm chart for deployment
-│   └── volsync-webui/
 └── Dockerfile           # Multi-stage container build
 ```
 
@@ -124,26 +117,6 @@ docker run -p 8080:8080 volsync-webui:latest
 ```
 
 The container expects to run inside a Kubernetes cluster with access to the Kubernetes API.
-
-### Kubernetes Manifests
-
-```bash
-kubectl apply -f kube-manifests/
-```
-
-This creates:
-- `volsync-webui` namespace
-- `volsync-webui` ServiceAccount
-- `volsync-webui` ClusterRole (broad read access to pods, secrets, ReplicationSources, HelmReleases)
-- ClusterRoleBinding linking SA to ClusterRole
-- Deployment with readiness/liveness probes
-- ClusterIP Service on port 8080
-
-### Helm
-
-```bash
-helm install volsync-webui ./helm-charts/volsync-webui/
-```
 
 ## RBAC Permissions
 

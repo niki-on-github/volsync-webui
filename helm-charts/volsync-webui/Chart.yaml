@@ -1,8 +1,0 @@
-apiVersion: v2
-name: volsync-webui
-description: A WebUI for managing VolSync backups, snapshots, and restores
-type: application
-version: 0.1.0
-appVersion: "0.1.0"
-sources:
-  - https://github.com/niki-on-github/volsync-webui

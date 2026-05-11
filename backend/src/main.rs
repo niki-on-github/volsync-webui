@@ -5,55 +5,77 @@ mod models;
 use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use axum::{Router, extract::Path, response::Response};
+use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Serve static files from the `public/` directory with SPA fallback.
-async fn serve_static(Path(path): Path<String>) -> Response {
+async fn serve_static(req: Request) -> Response {
+    // Extract the path from the request URI
+    let path = req.uri().path().to_string();
+
+    tracing::debug!("Serving static file: {}", path);
+
     // Normalize path: strip leading slash and prevent directory traversal
     let clean = path.trim_start_matches('/').replace("..", "");
     if clean.is_empty() || clean.contains("..") {
+        tracing::debug!("Fallback to index.html (empty or invalid path)");
         return serve_index().await;
     }
 
     let file_path = format!("public/{}", clean);
     match tokio::fs::read(&file_path).await {
-        Ok(contents) => Response::builder()
-            .status(200)
-            .body(axum::body::Body::from(contents))
-            .unwrap(),
-        Err(_) => serve_index().await,
+        Ok(contents) => {
+            tracing::debug!("Served static file: {}", file_path);
+            Response::builder()
+                .status(200)
+                .body(Body::from(contents))
+                .unwrap()
+        }
+        Err(_) => {
+            tracing::debug!("Static file not found, fallback to index.html: {}", file_path);
+            serve_index().await
+        }
     }
 }
 
 /// Serve index.html for SPA client-side routing fallback.
 async fn serve_index() -> Response {
     match tokio::fs::read("public/index.html").await {
-        Ok(contents) => Response::builder()
-            .status(200)
-            .body(axum::body::Body::from(contents))
-            .unwrap(),
-        Err(_) => Response::builder()
-            .status(404)
-            .body(axum::body::Body::from("Not found"))
-            .unwrap(),
+        Ok(contents) => {
+            tracing::debug!("Served index.html");
+            Response::builder()
+                .status(200)
+                .body(Body::from(contents))
+                .unwrap()
+        }
+        Err(_) => {
+            tracing::warn!("index.html not found in public/ directory");
+            Response::builder()
+                .status(404)
+                .body(Body::from("Not found"))
+                .unwrap()
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".into());
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
+        .with(tracing_subscriber::EnvFilter::new(rust_log.clone()))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    tracing::info!("Starting VolSync WebUI (RUST_LOG={})", rust_log);
+
     let kubectl = Arc::new(RwLock::new(match kubectl::Kubectl::new().await {
-        Ok(k) => k,
+        Ok(k) => {
+            tracing::info!("Kubernetes client initialized successfully");
+            k
+        }
         Err(e) => {
-            eprintln!("Failed to create kubectl client: {}", e);
+            tracing::error!("Failed to create Kubernetes client: {}", e);
             std::process::exit(1);
         }
     }));
@@ -83,13 +105,22 @@ async fn main() {
     let listener = match tokio::net::TcpListener::bind("0.0.0.0:8080").await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind to port 8080: {}", e);
+            tracing::error!("Failed to bind to port 8080: {}", e);
             std::process::exit(1);
         }
     };
-    tracing::info!("Server listening on {}", listener.local_addr().unwrap());
+    let addr = listener.local_addr().unwrap();
+    tracing::info!("Server listening on http://{}", addr);
+    tracing::info!("Available routes:");
+    tracing::info!("  GET  /health");
+    tracing::info!("  GET  /api/namespaces");
+    tracing::info!("  GET  /api/apps");
+    tracing::info!("  GET  /api/apps/:app/:ns/snapshots");
+    tracing::info!("  POST /api/apps/:app/:ns/backup");
+    tracing::info!("  POST /api/apps/:app/:ns/restore");
+    tracing::info!("  POST /api/apps/backup-all");
     if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("Server error: {}", e);
+        tracing::error!("Server error: {}", e);
         std::process::exit(1);
     }
 }

@@ -4,6 +4,4 @@ target
 .cargo/git
 *.md
 flake.lock
-kube-manifests/
-helm-charts/
 Dockerfile.notworking

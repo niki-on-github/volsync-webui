@@ -51,20 +51,27 @@ pub async fn list_apps(
     State(kubectl): State<AppState>,
     axum::extract::Query(namespace): axum::extract::Query<Option<String>>,
 ) -> Result<Json<Vec<App>>, ApiError> {
+    let ns_filter = namespace.as_deref().unwrap_or("all");
+    tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
+
     let kubectl = {
         let guard = kubectl.read().await;
         guard.clone()
     };
     let apps = kubectl.list_apps(namespace.as_deref()).await.map_err(ApiError::from)?;
+    tracing::debug!("list_apps returning {} apps", apps.len());
     Ok(Json(apps))
 }
 
 pub async fn list_namespaces(State(kubectl): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
+    tracing::debug!("list_namespaces called");
+
     let kubectl = {
         let guard = kubectl.read().await;
         guard.clone()
     };
     let namespaces = kubectl.list_namespaces().await.map_err(ApiError::from)?;
+    tracing::debug!("list_namespaces returning {} namespaces", namespaces.len());
     Ok(Json(namespaces))
 }
 
@@ -72,11 +79,14 @@ pub async fn get_snapshots(
     Path((app, ns)): Path<(String, String)>,
     State(kubectl): State<AppState>,
 ) -> Result<Json<Vec<Snapshot>>, ApiError> {
+    tracing::debug!("get_snapshots called for app={} namespace={}", app, ns);
+
     let kubectl = {
         let guard = kubectl.read().await;
         guard.clone()
     };
     let snapshots = kubectl.get_snapshots(&app, &ns).await.map_err(ApiError::from)?;
+    tracing::debug!("get_snapshots returning {} snapshots for app={}", snapshots.len(), app);
     Ok(Json(snapshots))
 }
 
@@ -84,29 +94,37 @@ pub async fn trigger_backup(
     Path((app, ns)): Path<(String, String)>,
     State(kubectl): State<AppState>,
 ) -> Result<Json<BackupResponse>, ApiError> {
+    tracing::info!("trigger_backup called for app={} namespace={}", app, ns);
+
     // Clone Kubectl and drop lock before long polling loop (Bug #2 fix)
     let kubectl = {
         let guard = kubectl.read().await;
         guard.clone()
     };
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    tracing::debug!("trigger_backup using trigger ID: {}", trigger);
     let resp = kubectl.trigger_backup(&app, &ns, &trigger).await.map_err(ApiError::from)?;
+    tracing::info!("trigger_backup completed for app={} status={}", app, resp.status);
     Ok(Json(resp))
 }
 
 pub async fn trigger_backup_all(State(kubectl): State<AppState>) -> Result<Json<BackupAllResponse>, ApiError> {
+    tracing::info!("trigger_backup_all called");
+
     // Clone Kubectl and drop lock before spawning concurrent tasks (Bug #3 fix)
     let kubectl = {
         let guard = kubectl.read().await;
         guard.clone()
     };
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
+    tracing::debug!("trigger_backup_all using trigger ID: {}", trigger);
     let apps = kubectl.trigger_backup_all(&trigger).await.map_err(ApiError::from)?;
 
     // Aggregate summary
     let total = apps.len();
     let success = apps.iter().filter(|a| a.success).count();
     let failed = total - success;
+    tracing::info!("trigger_backup_all completed: {}/{} succeeded, {} failed", success, total, failed);
 
     Ok(Json(BackupAllResponse {
         trigger,

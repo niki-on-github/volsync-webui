@@ -160,13 +160,18 @@ impl Kubectl {
     }
 
     pub async fn list_apps(&self, namespace: Option<&str>) -> Result<Vec<App>, KubeError> {
+        let ns_filter = namespace.unwrap_or("all");
+        tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
+
         let resp: Value = self.request("GET", "/apis/replication.storage.io/v1alpha1/replicationsources", None).await?;
 
         let items = resp.get("items")
             .and_then(|v| v.as_array())
             .ok_or_else(|| KubeError::Api("No items in response".to_string()))?;
 
-        let apps = items.iter().filter_map(|item| {
+        tracing::debug!("list_apps received {} ReplicationSources from API", items.len());
+
+        let apps: Vec<App> = items.iter().filter_map(|item| {
             let name = item.get("metadata")?.get("name")?.as_str()?.to_string();
             let namespace_item = item.get("metadata")?.get("namespace")?.as_str()?.to_string();
             // Filter by namespace if specified
@@ -178,24 +183,32 @@ impl Kubectl {
             Some(App { name, namespace: namespace_item })
         }).collect();
 
+        tracing::debug!("list_apps returning {} apps (filtered from {})", apps.len(), items.len());
         Ok(apps)
     }
 
     pub async fn list_namespaces(&self) -> Result<Vec<String>, KubeError> {
+        tracing::debug!("list_namespaces called");
+
         let resp: Value = self.request("GET", "/api/v1/namespaces", None).await?;
 
         let items = resp.get("items")
             .and_then(|v| v.as_array())
             .ok_or_else(|| KubeError::Api("No items in response".to_string()))?;
 
+        tracing::debug!("list_namespaces received {} namespaces from API", items.len());
+
         let mut namespaces: Vec<String> = items.iter()
             .filter_map(|item| item.get("metadata")?.get("name")?.as_str()?.to_string().into())
             .collect();
         namespaces.sort();
+        tracing::debug!("list_namespaces returning {} sorted namespaces", namespaces.len());
         Ok(namespaces)
     }
 
     pub async fn trigger_backup(&self, app: &str, ns: &str, trigger: &str) -> Result<BackupResponse, KubeError> {
+        tracing::info!("trigger_backup starting for app={} namespace={}", app, ns);
+
         let url = format!(
             "/apis/replication.storage.io/v1alpha1/namespaces/{}/replicationsources/{}",
             ns, app
@@ -207,14 +220,23 @@ impl Kubectl {
             }
         });
 
+        tracing::debug!("trigger_backup PATCHing ReplicationSource with trigger={}", trigger);
         self.request("PATCH", &url, Some(patch)).await?;
+        tracing::debug!("trigger_backup ReplicationSource updated, starting poll loop");
+
+        let backup_timeout = backup_timeout_secs();
+        let poll_interval = polling_interval_secs();
+        tracing::info!("trigger_backup polling with timeout={}s interval={}s", backup_timeout, poll_interval);
 
         let start = std::time::Instant::now();
+        let mut poll_count = 0;
         loop {
-            if start.elapsed() > Duration::from_secs(backup_timeout_secs()) {
+            poll_count += 1;
+            if start.elapsed() > Duration::from_secs(backup_timeout) {
+                tracing::warn!("trigger_backup polling timed out after {} polls for app={}", poll_count, app);
                 return Err(KubeError::Timeout("Backup polling timed out".to_string()));
             }
-            sleep(Duration::from_secs(polling_interval_secs())).await;
+            sleep(Duration::from_secs(poll_interval)).await;
 
             let rs: Value = self.request("GET", &url, None).await?;
 
@@ -222,6 +244,7 @@ impl Kubectl {
                 .and_then(|s| s.get("lastManualSync"))
                 .and_then(|v| v.as_str()) {
                 if last_sync == trigger {
+                    tracing::info!("trigger_backup completed on poll #{} for app={}", poll_count, app);
                     let result = rs.get("status")
                         .and_then(|s| s.get("latestMoverStatus"))
                         .and_then(|m| m.get("result"))
@@ -250,6 +273,7 @@ impl Kubectl {
 
                     // If any condition has a Failure/Error status, return error
                     if cond_status == Some("False") && (cond_type == Some("Ready") || cond_type == Some("Synchronizing")) {
+                        tracing::warn!("trigger_backup detected failure on poll #{} for app={}: {:?} - {:?}", poll_count, app, cond_reason, cond_message);
                         let result = rs.get("status")
                             .and_then(|s| s.get("latestMoverStatus"))
                             .and_then(|m| m.get("result"))
@@ -269,8 +293,10 @@ impl Kubectl {
                     .and_then(|v| v.as_str());
 
                 match status {
-                    Some("SyncInProgress") | Some("Pending") => continue,
+                    Some("SyncInProgress") => tracing::debug!("trigger_backup poll #{}: SyncInProgress for app={}", poll_count, app),
+                    Some("Pending") => tracing::debug!("trigger_backup poll #{}: Pending for app={}", poll_count, app),
                     Some(reason) => {
+                        tracing::info!("trigger_backup completed on poll #{} with reason={} for app={}", poll_count, reason, app);
                         let result = rs.get("status")
                             .and_then(|s| s.get("latestMoverStatus"))
                             .and_then(|m| m.get("result"))
@@ -283,10 +309,10 @@ impl Kubectl {
                             result,
                         });
                     }
-                    None => continue,
+                    None => tracing::debug!("trigger_backup poll #{}: no Synchronizing condition for app={}", poll_count, app),
                 }
             } else {
-                continue;
+                tracing::debug!("trigger_backup poll #{}: no conditions array for app={}", poll_count, app);
             }
         }
     }
@@ -347,6 +373,8 @@ impl Kubectl {
     }
 
     pub async fn get_snapshots(&self, app: &str, ns: &str) -> Result<Vec<Snapshot>, KubeError> {
+        tracing::info!("get_snapshots called for app={} namespace={}", app, ns);
+
         // Use timestamp-based suffix to prevent race conditions between concurrent requests (Bug #12 fix)
         let random_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -355,6 +383,7 @@ impl Kubectl {
         let pod_name = format!("volsync-snapshots-{}-{}", app, random_suffix);
         let pod_url = format!("/api/v1/namespaces/{}/pods/{}", ns, pod_name);
 
+        tracing::debug!("get_snapshots creating pod {} in namespace {}", pod_name, ns);
         let create_url = format!("/api/v1/namespaces/{}/pods", ns);
         let pod_manifest = serde_json::json!({
             "apiVersion": "v1",
@@ -372,11 +401,15 @@ impl Kubectl {
         });
 
         let _create: Value = self.request("POST", &create_url, Some(pod_manifest)).await?;
+        tracing::debug!("get_snapshots pod {} created successfully", pod_name);
 
         let start = std::time::Instant::now();
+        let mut poll_count = 0;
         loop {
+            poll_count += 1;
             if start.elapsed() > Duration::from_secs(pod_startup_timeout_secs()) {
                 // Clean up failed pod before returning error
+                tracing::warn!("get_snapshots pod {} timed out after {} polls", pod_name, poll_count);
                 let _ = self.request("DELETE", &pod_url, None).await;
                 return Err(KubeError::Timeout("Pod startup timed out".to_string()));
             }
@@ -388,10 +421,15 @@ impl Kubectl {
                     if let Some(phase) = pod.get("status")
                         .and_then(|s| s.get("phase"))
                         .and_then(|v| v.as_str()) {
+                        tracing::debug!("get_snapshots poll #{}: pod {} phase={}", poll_count, pod_name, phase);
                         match phase {
-                            "Succeeded" => break,
+                            "Succeeded" => {
+                                tracing::info!("get_snapshots pod {} succeeded after {} polls", pod_name, poll_count);
+                                break;
+                            }
                             "Failed" => {
                                 // Clean up failed pod before returning error
+                                tracing::warn!("get_snapshots pod {} failed after {} polls", pod_name, poll_count);
                                 let _ = self.request("DELETE", &pod_url, None).await;
                                 return Err(KubeError::SnapshotFailed("Pod failed".to_string()));
                             }
@@ -399,45 +437,63 @@ impl Kubectl {
                         }
                     }
                 }
-                Err(_) => {}
+                Err(e) => {
+                    tracing::debug!("get_snapshots poll #{}: pod {} not ready yet: {}", poll_count, pod_name, e);
+                }
             }
         }
 
         let log_url = format!("/api/v1/namespaces/{}/pods/{}/log", ns, pod_name);
         // Pod logs are raw text output from restic CLI, NOT JSON lines.
         // Restic outputs one JSON object per line when --json flag is used.
+        tracing::debug!("get_snapshots fetching logs for pod {}", pod_name);
         let logs: String = self.request("GET", &log_url, None).await?.to_string();
+        tracing::debug!("get_snapshots fetched {} bytes of logs for pod {}", logs.len(), pod_name);
 
         // Clean up pod after reading logs — handle error gracefully but log it
         if let Err(e) = self.request("DELETE", &pod_url, None).await {
-            tracing::warn!("Pod cleanup failed: {}", e);
+            tracing::warn!("get_snapshots pod cleanup failed: {}", e);
+        } else {
+            tracing::debug!("get_snapshots pod {} cleaned up", pod_name);
         }
 
+        let snapshot_count = parse_snapshots(&logs).map(|s| s.len()).unwrap_or(0);
+        tracing::info!("get_snapshots returning {} snapshots for app={}", snapshot_count, app);
         parse_snapshots(&logs)
     }
 
     pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
+        tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
+
         // Suspend HelmRelease — propagate error if it fails (resource may not exist for non-Flux apps)
         let hr_url = format!("/apis/source.toolkit.fluxcd.io/v1beta2/namespaces/{}/helmreleases/{}", ns, app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": true } }))).await {
-            tracing::debug!("HelmRelease suspend skipped (may not exist): {}", e);
+            tracing::debug!("trigger_restore HelmRelease suspend skipped (may not exist): {}", e);
+        } else {
+            tracing::info!("trigger_restore HelmRelease suspended for app={}", app);
         }
 
         // Scale deployment to 0 — but first read the original replica count so we can restore it
         let deploy_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, app);
         let original_replicas: Option<i64> = match self.request("GET", &deploy_url, None).await {
-            Ok(deploy) => deploy.get("spec")
-                .and_then(|s| s.get("replicas"))
-                .and_then(|r| r.as_i64()),
+            Ok(deploy) => {
+                let replicas = deploy.get("spec")
+                    .and_then(|s| s.get("replicas"))
+                    .and_then(|r| r.as_i64());
+                tracing::debug!("trigger_restore read deployment {} with replicas={:?}", app, replicas);
+                replicas
+            }
             Err(e) => {
-                tracing::debug!("Deployment read skipped (may not exist): {}", e);
+                tracing::debug!("trigger_restore Deployment read skipped (may not exist): {}", e);
                 None
             }
         };
 
         let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, app);
         if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": 0 } }))).await {
-            tracing::debug!("Deployment scale-down skipped (may not exist): {}", e);
+            tracing::debug!("trigger_restore Deployment scale-down skipped (may not exist): {}", e);
+        } else {
+            tracing::info!("trigger_restore deployment scaled to 0 for app={}", app);
         }
 
         let dst_name = format!("{}-dst", app);
@@ -460,16 +516,25 @@ impl Kubectl {
             }
         });
 
+        tracing::debug!("trigger_restore PATCHing ReplicationDestination with trigger={}", trigger);
         self.request("PATCH", &dst_url, Some(dst_patch)).await?;
+        tracing::info!("trigger_restore ReplicationDestination updated, starting poll loop");
+
+        let restore_timeout = restore_timeout_secs();
+        let poll_interval = polling_interval_secs();
+        tracing::info!("trigger_restore polling with timeout={}s interval={}s", restore_timeout, poll_interval);
 
         let start = std::time::Instant::now();
+        let mut poll_count = 0;
         loop {
-            if start.elapsed() > Duration::from_secs(restore_timeout_secs()) {
+            poll_count += 1;
+            if start.elapsed() > Duration::from_secs(restore_timeout) {
                 // Resume deployment and HelmRelease before returning error
+                tracing::warn!("trigger_restore polling timed out after {} polls for app={}", poll_count, app);
                 self.resume_restore(app, ns, original_replicas).await;
                 return Err(KubeError::Timeout("Restore polling timed out".to_string()));
             }
-            sleep(Duration::from_secs(polling_interval_secs())).await;
+            sleep(Duration::from_secs(poll_interval)).await;
 
             let dst: Value = self.request("GET", &dst_url, None).await?;
 
@@ -487,6 +552,7 @@ impl Kubectl {
                     // Only report completed if mover status is Successful or None (no mover ran)
                     let finished = result.as_deref() == Some("Successful") || result.is_none();
                     if finished {
+                        tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
                         // Resume deployment and HelmRelease
                         self.resume_restore(app, ns, original_replicas).await;
                         return Ok(RestoreResponse {
@@ -496,6 +562,7 @@ impl Kubectl {
                         });
                     } else {
                         // Restore didn't succeed — resume and return error
+                        tracing::warn!("trigger_restore failed on poll #{} for app={}: result={:?}", poll_count, app, result);
                         self.resume_restore(app, ns, original_replicas).await;
                         return Err(KubeError::SnapshotFailed(format!(
                             "Restore failed with result: {:?}", result
@@ -503,17 +570,31 @@ impl Kubectl {
                     }
                 }
             }
+
+            if poll_count % 15 == 0 {
+                tracing::debug!("trigger_restore poll #{} for app={} (still waiting)", poll_count, app);
+            }
         }
     }
 
     /// Resume the deployment and HelmRelease to their original state after restore completes (success or failure)
     async fn resume_restore(&self, app: &str, ns: &str, original_replicas: Option<i64>) {
+        tracing::debug!("resume_restore called for app={} replicas={:?}", app, original_replicas);
+
         let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, app);
         let replicas = original_replicas.unwrap_or(1);
-        let _ = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await;
+        if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
+            tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", app, replicas, e);
+        } else {
+            tracing::info!("resume_restore scaled deployment {} back to {} replicas", app, replicas);
+        }
 
         let hr_url = format!("/apis/source.toolkit.fluxcd.io/v1beta2/namespaces/{}/helmreleases/{}", ns, app);
-        let _ = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await;
+        if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
+            tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", app, e);
+        } else {
+            tracing::info!("resume_restore HelmRelease resumed for app={}", app);
+        }
     }
 }
 

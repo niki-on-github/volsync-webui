@@ -70,6 +70,11 @@ fn get_base_url() -> String {
 }
 
 async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, method: &str, body: Option<&str>) -> Result<T, String> {
+    log::debug!("fetch_json: {} {}", method, url);
+    if let Some(b) = body {
+        log::debug!("fetch_json: request body={}", b);
+    }
+
     let opts = RequestInit::new();
     opts.set_method(method);
 
@@ -81,13 +86,22 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, method: &str, body:
         opts.set_headers(&headers);
     }
 
-    let request = Request::new_with_str_and_init(url, &opts).map_err(|e| e.as_string().unwrap_or_default())?;
+    let request = Request::new_with_str_and_init(url, &opts).map_err(|e| {
+        log::error!("fetch_json: failed to create request for {}: {}", url, e.as_string().unwrap_or_default());
+        e.as_string().unwrap_or_default()
+    })?;
 
     let window = web_sys::window().ok_or("No window")?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
-        .map_err(|e| e.as_string().unwrap_or_default())?;
-    let resp: Response = resp_value.dyn_into().map_err(|e| e.as_string().unwrap_or_default())?;
+        .map_err(|e| {
+            log::error!("fetch_json: fetch failed for {}: {}", url, e.as_string().unwrap_or_default());
+            e.as_string().unwrap_or_default()
+        })?;
+    let resp: Response = resp_value.dyn_into().map_err(|e| {
+        log::error!("fetch_json: failed to dyn_into Response for {}: {}", url, e.as_string().unwrap_or_default());
+        e.as_string().unwrap_or_default()
+    })?;
 
     // Bug #9 fix: Check HTTP status code before parsing response
     let status = resp.status();
@@ -97,54 +111,131 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, method: &str, body:
             .map_err(|e| e.as_string().unwrap_or_default())?
             .as_string()
             .unwrap_or_default();
+        log::error!("fetch_json: HTTP {} for {}: {}", status, url, error_text);
         return Err(format!("HTTP {}: {}", status, error_text));
     }
 
     let json_str = JsFuture::from(resp.text().map_err(|e| e.as_string().unwrap_or_default())?)
         .await
-        .map_err(|e| e.as_string().unwrap_or_default())?
+        .map_err(|e| {
+            log::error!("fetch_json: failed to get response text for {}: {}", url, e.as_string().unwrap_or_default());
+            e.as_string().unwrap_or_default()
+        })?
         .as_string()
         .ok_or("Failed to get response text")?;
 
-    serde_json::from_str(&json_str).map_err(|e| e.to_string())
+    let result = serde_json::from_str::<T>(&json_str).map_err(|e| {
+        log::error!("fetch_json: failed to parse JSON for {}: {}", url, e);
+        e.to_string()
+    });
+
+    if result.is_ok() {
+        log::debug!("fetch_json: success {} {}", method, url);
+    }
+    result
 }
 
 pub async fn list_namespaces() -> Result<Vec<String>, String> {
+    log::debug!("list_namespaces called");
     let url = format!("{}/api/namespaces", get_base_url());
-    fetch_json(&url, "GET", None).await
+    match fetch_json::<Vec<String>>(&url, "GET", None).await {
+        Ok(ns) => {
+            log::debug!("list_namespaces returned {} namespaces", ns.len());
+            Ok(ns)
+        }
+        Err(e) => {
+            log::error!("list_namespaces failed: {}", e);
+            Err(e)
+        }
+    }
 }
 
 pub async fn list_apps(namespace: Option<&str>) -> Result<Vec<App>, String> {
+    let ns_filter = namespace.unwrap_or("all");
+    log::debug!("list_apps called with namespace filter: {}", ns_filter);
     let base_url = get_base_url();
     let url = if let Some(ns) = namespace {
         format!("{}/api/apps?namespace={}", base_url, ns)
     } else {
         format!("{}/api/apps", base_url)
     };
-    fetch_json(&url, "GET", None).await
+    match fetch_json::<Vec<App>>(&url, "GET", None).await {
+        Ok(apps) => {
+            log::debug!("list_apps returned {} apps", apps.len());
+            Ok(apps)
+        }
+        Err(e) => {
+            log::error!("list_apps failed: {}", e);
+            Err(e)
+        }
+    }
 }
 
 pub async fn get_snapshots(app: &str, ns: &str) -> Result<Vec<Snapshot>, String> {
+    log::debug!("get_snapshots called for app={} namespace={}", app, ns);
     let url = format!("{}/api/apps/{}/{}/snapshots", get_base_url(), app, ns);
-    fetch_json(&url, "GET", None).await
+    match fetch_json::<Vec<Snapshot>>(&url, "GET", None).await {
+        Ok(snaps) => {
+            log::debug!("get_snapshots returned {} snapshots for app={}", snaps.len(), app);
+            Ok(snaps)
+        }
+        Err(e) => {
+            log::error!("get_snapshots failed for app={}: {}", app, e);
+            Err(e)
+        }
+    }
 }
 
 pub async fn trigger_backup(app: &str, ns: &str) -> Result<BackupResponse, String> {
+    log::info!("trigger_backup called for app={} namespace={}", app, ns);
     let url = format!("{}/api/apps/{}/{}/backup", get_base_url(), app, ns);
-    fetch_json(&url, "POST", None).await
+    match fetch_json::<BackupResponse>(&url, "POST", None).await {
+        Ok(resp) => {
+            log::info!("trigger_backup completed for app={} status={}", app, resp.status);
+            Ok(resp)
+        }
+        Err(e) => {
+            log::error!("trigger_backup failed for app={}: {}", app, e);
+            Err(e)
+        }
+    }
 }
 
 pub async fn trigger_backup_all() -> Result<BackupAllResponse, String> {
+    log::info!("trigger_backup_all called");
     let url = format!("{}/api/apps/backup-all", get_base_url());
-    fetch_json(&url, "POST", None).await
+    match fetch_json::<BackupAllResponse>(&url, "POST", None).await {
+        Ok(resp) => {
+            let success = resp.apps.iter().filter(|a| a.success).count();
+            log::info!("trigger_backup_all completed: {}/{} succeeded", success, resp.apps.len());
+            Ok(resp)
+        }
+        Err(e) => {
+            log::error!("trigger_backup_all failed: {}", e);
+            Err(e)
+        }
+    }
 }
 
 pub async fn trigger_restore(app: &str, ns: &str, trigger: &str, timestamp: Option<String>) -> Result<RestoreResponse, String> {
+    log::info!("trigger_restore called for app={} namespace={} timestamp={:?}", app, ns, timestamp);
     let url = format!("{}/api/apps/{}/{}/restore", get_base_url(), app, ns);
     let body = RestoreRequest {
         trigger: trigger.to_string(),
         timestamp,
     };
-    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
-    fetch_json(&url, "POST", Some(&body_str)).await
+    let body_str = serde_json::to_string(&body).map_err(|e| {
+        log::error!("trigger_restore: failed to serialize request body: {}", e);
+        e.to_string()
+    })?;
+    match fetch_json::<RestoreResponse>(&url, "POST", Some(&body_str)).await {
+        Ok(resp) => {
+            log::info!("trigger_restore completed for app={} status={}", app, resp.status);
+            Ok(resp)
+        }
+        Err(e) => {
+            log::error!("trigger_restore failed for app={}: {}", app, e);
+            Err(e)
+        }
+    }
 }
