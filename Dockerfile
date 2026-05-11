@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
 
 # Install trunk and wasm target for frontend build
 RUN rustup target add wasm32-unknown-unknown && \
-    cargo install trunk --version 0.21.14
+    cargo install trunk --version 0.21.14 && \
+    cargo install wasm-bindgen-cli --version 0.2.121
 
 # Copy workspace Cargo files first for layer caching
 COPY Cargo.toml Cargo.lock ./
