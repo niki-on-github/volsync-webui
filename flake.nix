@@ -23,6 +23,7 @@
               openssl
               nodejs
               llvmPackages.lld
+              kubernetes-helm
             ];
           };
         }

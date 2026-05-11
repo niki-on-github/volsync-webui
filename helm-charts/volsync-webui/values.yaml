@@ -21,3 +21,13 @@ namespace: volsync-webui
 
 rbac:
   create: true
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
