@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "volsync-webui.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "volsync-webui.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  - port: {{ .Values.service.port }}
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    {{- include "volsync-webui.selectorLabels" . | nindent 4 }}

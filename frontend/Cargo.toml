@@ -1,0 +1,27 @@
+[package]
+name = "volsync-webui-frontend"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+yew.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
+reqwasm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlElement", "Window", "Document", "HtmlSelectElement"] }
+wasm-logger = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+lto = true
+codegen-units = 1

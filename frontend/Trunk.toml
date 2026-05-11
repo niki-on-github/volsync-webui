@@ -1,0 +1,9 @@
+[build]
+
+[tools]
+wasm_opt = "version_123"
+
+[serve]
+addresses = ["0.0.0.0"]
+port = 8080
+launch_browser = false

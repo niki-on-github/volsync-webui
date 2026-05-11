@@ -1,0 +1,11 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: volsync-webui
+roleRef:
+  kind: ClusterRole
+  name: volsync-webui
+subjects:
+- kind: ServiceAccount
+  name: volsync-webui
+  namespace: volsync-webui

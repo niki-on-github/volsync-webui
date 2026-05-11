@@ -1,0 +1,23 @@
+replicaCount: 1
+
+image:
+  repository: volsync-webui
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+namespace: volsync-webui
+
+rbac:
+  create: true

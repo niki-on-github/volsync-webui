@@ -1,0 +1,9 @@
+.git
+target
+.cargo/registry
+.cargo/git
+*.md
+flake.lock
+kube-manifests/
+helm-charts/
+Dockerfile.notworking
