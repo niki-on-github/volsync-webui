@@ -1,8 +1,8 @@
 replicaCount: 1
 
 image:
-  repository: volsync-webui
-  tag: latest
+  repository: ghcr.io/niki-on-github/volsync-webui
+  tag: v0.0.1
   pullPolicy: IfNotPresent
 
 service:
