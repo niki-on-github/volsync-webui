@@ -1,0 +1,85 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: volsync-webui
+  namespace: backup
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: app-template
+      version: 4.6.2
+      sourceRef:
+        kind: HelmRepository
+        name: bjw-s-charts
+        namespace: flux-system
+
+  values:
+    defaultPodOptions:
+      automountServiceAccountToken: true
+
+    serviceAccount:
+      volsync-webui:
+        enabled: true
+        annotations: {}
+
+    rbac:
+      roles:
+        volsync-webui:
+          enabled: true
+          type: ClusterRole
+          rules:
+            - apiGroups: ["replication.storage.io"]
+              resources: ["replicationsources", "replicationdestinations"]
+              verbs: ["get", "list", "patch"]
+            - apiGroups: [""]
+              resources: ["pods", "secrets"]
+              verbs: ["get", "list", "create", "delete"]
+            - apiGroups: [""]
+              resources: ["namespaces"]
+              verbs: ["get", "list"]
+            - apiGroups: ["source.toolkit.fluxcd.io"]
+              resources: ["helmreleases"]
+              verbs: ["get", "patch", "suspend", "resume"]
+      bindings:
+        volsync-webui:
+          enabled: true
+          type: ClusterRoleBinding
+          roleRef:
+            identifier: volsync-webui
+          subjects:
+            - identifier: volsync-webui
+
+    controllers:
+      volsync-webui:
+        containers:
+          app:
+            image:
+              repository: ghcr.io/niki-on-github/volsync-webui
+              tag: "v0.0.1@sha256:fdcc160d9266b9c88e3d2ae38f3b1f78cd3113fbc317ad3415709ba595c4a5ad"
+
+    service:
+      webui:
+        controller: volsync-webui
+        ports:
+          http:
+            port: 8080
+
+    ingress:
+      webui:
+        className: traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+        hosts:
+          - host: &ingress "volsync-webui.${SECRET_DOMAIN}"
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: webui
+                  port: http
+        tls:
+          - hosts:
+              - *ingress
