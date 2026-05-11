@@ -24,11 +24,19 @@ async fn serve_static(req: Request) -> Response {
     }
 
     let file_path = format!("public/{}", clean);
+    let mime_type = match file_path.rsplit('.').next().unwrap() {
+        "html" => "text/html",
+        "js" => "application/javascript",
+        "wasm" => "application/wasm",
+        "css" => "text/css",
+        _ => "application/octet-stream",
+    };
     match tokio::fs::read(&file_path).await {
         Ok(contents) => {
             tracing::debug!("Served static file: {}", file_path);
             Response::builder()
                 .status(200)
+                .header("Content-Type", mime_type)
                 .body(Body::from(contents))
                 .unwrap()
         }
@@ -46,6 +54,7 @@ async fn serve_index() -> Response {
             tracing::debug!("Served index.html");
             Response::builder()
                 .status(200)
+                .header("Content-Type", "text/html")
                 .body(Body::from(contents))
                 .unwrap()
         }
