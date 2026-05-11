@@ -154,10 +154,9 @@ pub async fn list_apps(namespace: Option<&str>) -> Result<Vec<App>, String> {
     let ns_filter = namespace.unwrap_or("all");
     log::debug!("list_apps called with namespace filter: {}", ns_filter);
     let base_url = get_base_url();
-    let url = if let Some(ns) = namespace {
-        format!("{}/api/apps?namespace={}", base_url, ns)
-    } else {
-        format!("{}/api/apps", base_url)
+    let url = match namespace {
+        Some(ns) if ns != "all" => format!("{}/api/apps?namespace={}", base_url, ns),
+        _ => format!("{}/api/apps", base_url),
     };
     match fetch_json::<Vec<App>>(&url, "GET", None).await {
         Ok(apps) => {

@@ -69,8 +69,6 @@ pub struct Kubectl {
 
 impl Kubectl {
     pub async fn new() -> Result<Self, KubeError> {
-        let client = Client::new();
-
         let base_url = std::env::var("KUBERNETES_SERVICE_HOST")
             .map(|h| format!("https://{}:443", h))
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
@@ -78,7 +76,6 @@ impl Kubectl {
         let secret_suffix = std::env::var("VOLSYNC_SECRET_SUFFIX")
             .unwrap_or_else(|_| "-volsync-secret".to_string());
 
-        // Read ServiceAccount token if available (in-cluster deployment)
         let token_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token");
         let token = if token_path.exists() {
             match tokio::fs::read_to_string(token_path).await {
@@ -94,6 +91,29 @@ impl Kubectl {
         } else {
             tracing::info!("No ServiceAccount token found; running outside cluster or without RBAC");
             None
+        };
+
+        let ca_cert_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt");
+        let client = if ca_cert_path.exists() {
+            match tokio::fs::read(ca_cert_path).await {
+                Ok(ca_cert) => {
+                    let cert = reqwest::Certificate::from_pem(&ca_cert)
+                        .map_err(|e| KubeError::Api(format!("Failed to parse CA certificate: {}", e)))?;
+                    let client = reqwest::Client::builder()
+                        .add_root_certificate(cert)
+                        .build()
+                        .map_err(|e| KubeError::Api(format!("Failed to build client with CA: {}", e)))?;
+                    tracing::info!("Loaded CA certificate from {}", ca_cert_path.display());
+                    client
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read CA certificate: {}, using default client", e);
+                    reqwest::Client::new()
+                }
+            }
+        } else {
+            tracing::info!("No CA certificate found at {}, using default client", ca_cert_path.display());
+            reqwest::Client::new()
         };
 
         Ok(Self { client, base_url, secret_suffix, token })
