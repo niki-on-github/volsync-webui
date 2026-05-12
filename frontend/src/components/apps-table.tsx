@@ -1,8 +1,11 @@
+import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { App } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
+type SortKey = keyof App;
 
 interface Props {
   apps: App[];
@@ -11,6 +14,26 @@ interface Props {
   refreshing: boolean;
   onRefresh: () => void;
 }
+
+const SORT_LABELS: Record<SortKey, string> = {
+  name: "App",
+  namespace: "Namespace",
+  last_sync_time: "Last Backup",
+  last_sync_duration: "Duration",
+  last_result: "Result",
+  next_sync_time: "Next Backup",
+  in_progress: "",
+  paused: "",
+};
+
+const SORT_COLUMNS: SortKey[] = [
+  "name",
+  "namespace",
+  "last_sync_time",
+  "last_sync_duration",
+  "last_result",
+  "next_sync_time",
+];
 
 function formatTime(iso: string | null): string {
   if (!iso) return "-";
@@ -26,7 +49,41 @@ function formatDuration(secs: string | null): string {
   return secs ?? "-";
 }
 
+function sortValue(app: App, key: SortKey): string | number {
+  if (key === "last_sync_duration") {
+    const raw = app.last_sync_duration ?? "";
+    const num = parseFloat(raw);
+    return isNaN(num) ? 0 : num;
+  }
+  const val = app[key];
+  if (val == null) return "";
+  if (typeof val === "boolean") return val ? 1 : 0;
+  return String(val);
+}
+
 export function AppsTable({ apps, selectedApp, onSelect, refreshing, onRefresh }: Props) {
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sorted = [...apps].sort((a, b) => {
+    const aVal = sortValue(a, sortKey);
+    const bVal = sortValue(b, sortKey);
+    if (typeof aVal === "number" && typeof bVal === "number") {
+      return sortDir === "asc" ? aVal - bVal : bVal - aVal;
+    }
+    const cmp = String(aVal).localeCompare(String(bVal));
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
   return (
     <div className="rounded-lg border bg-card text-card-foreground">
       <div className="flex items-center justify-between p-6 pb-4">
@@ -42,16 +99,22 @@ export function AppsTable({ apps, selectedApp, onSelect, refreshing, onRefresh }
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>App</TableHead>
-              <TableHead>Namespace</TableHead>
-              <TableHead>Last Backup</TableHead>
-              <TableHead>Duration</TableHead>
-              <TableHead>Result</TableHead>
-              <TableHead>Next Backup</TableHead>
+              {SORT_COLUMNS.map((key) => (
+                <TableHead
+                  key={key}
+                  className="cursor-pointer select-none"
+                  onClick={() => handleSort(key)}
+                >
+                  {SORT_LABELS[key]}
+                  {sortKey === key && (
+                    <span className="ml-1 text-xs">{sortDir === "asc" ? "▲" : "▼"}</span>
+                  )}
+                </TableHead>
+              ))}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {apps.map((app) => {
+            {sorted.map((app) => {
               const isSelected =
                 selectedApp?.name === app.name && selectedApp?.namespace === app.namespace;
               const resultOk =
@@ -76,7 +139,7 @@ export function AppsTable({ apps, selectedApp, onSelect, refreshing, onRefresh }
                   <TableCell>{formatDuration(app.last_sync_duration)}</TableCell>
                   <TableCell>
                     {app.last_result ? (
-                      <Badge variant={resultOk ? "default" : "destructive"}>
+                      <Badge variant={resultOk ? "success" : "destructive"}>
                         {resultOk ? "✓ OK" : "✗ Failed"}
                       </Badge>
                     ) : (
@@ -89,7 +152,7 @@ export function AppsTable({ apps, selectedApp, onSelect, refreshing, onRefresh }
                 </TableRow>
               );
             })}
-            {apps.length === 0 && (
+            {sorted.length === 0 && (
               <TableRow>
                 <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
                   No applications found

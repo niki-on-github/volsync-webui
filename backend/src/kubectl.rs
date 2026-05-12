@@ -63,9 +63,6 @@ impl std::error::Error for KubeError {}
 pub struct Kubectl {
     client: Client,
     base_url: String,
-    source_secret_suffix: String,
-    #[allow(dead_code)]
-    dest_secret_suffix: String,
     api_group: String,
     token: Option<String>,
 }
@@ -75,11 +72,6 @@ impl Kubectl {
         let base_url = std::env::var("KUBERNETES_SERVICE_HOST")
             .map(|h| format!("https://{}:443", h))
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
-
-        let source_secret_suffix = std::env::var("VOLSYNC_SOURCE_SECRET_SUFFIX")
-            .unwrap_or_else(|_| "-volsync-secret".to_string());
-        let dest_secret_suffix = std::env::var("VOLSYNC_DEST_SECRET_SUFFIX")
-            .unwrap_or_else(|_| "-volsync-secret".to_string());
 
         let api_group = std::env::var("VOLSYNC_API_GROUP")
             .unwrap_or_else(|_| "volsync.backube".to_string());
@@ -129,16 +121,7 @@ impl Kubectl {
             client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
         };
 
-        Ok(Self { client, base_url, source_secret_suffix, dest_secret_suffix, api_group, token })
-    }
-
-    fn source_secret_name(&self, app: &str) -> String {
-        format!("{}{}", app, self.source_secret_suffix)
-    }
-
-    #[allow(dead_code)]
-    fn dest_secret_name(&self, app: &str) -> String {
-        format!("{}{}", app, self.dest_secret_suffix)
+        Ok(Self { client, base_url, api_group, token })
     }
 
     pub async fn check_rbac(&self) {
@@ -157,7 +140,7 @@ impl Kubectl {
             ),
             (
                 "list HelmReleases",
-                "/apis/source.toolkit.fluxcd.io/v1beta2/helmreleases".to_string(),
+                "/apis/helm.toolkit.fluxcd.io/v2/helmreleases".to_string(),
             ),
         ];
 
@@ -280,7 +263,8 @@ impl Kubectl {
                 .map(String::from);
             let last_sync_duration = status
                 .and_then(|s| s.get("lastSyncDuration"))
-                .and_then(|v| v.as_f64())
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok())
                 .map(|d| format!("{:.1}s", d));
             let last_result = status
                 .and_then(|s| s.get("latestMoverStatus"))
@@ -492,6 +476,25 @@ impl Kubectl {
         let pod_name = format!("volsync-snapshots-{}-{}", app, unique_id);
         let pod_url = format!("/api/v1/namespaces/{}/pods/{}", ns, pod_name);
 
+        // Read the actual secret name from the ReplicationSource's spec.restic.repository
+        let rs_url = format!(
+            "/apis/{}/v1alpha1/namespaces/{}/replicationsources/{}",
+            self.api_group, ns, app
+        );
+        let rs: Value = self.request("GET", &rs_url, None).await?;
+        let secret_name = rs
+            .get("spec")
+            .and_then(|s| s.get("restic"))
+            .and_then(|r| r.get("repository"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                KubeError::Api(format!(
+                    "spec.restic.repository not found in ReplicationSource {}/{}",
+                    ns, app
+                ))
+            })?;
+        tracing::debug!("get_snapshots using secret {} for app={}", secret_name, app);
+
         tracing::debug!("get_snapshots creating pod {} in namespace {}", pod_name, ns);
         let create_url = format!("/api/v1/namespaces/{}/pods", ns);
         let pod_manifest = serde_json::json!({
@@ -504,7 +507,7 @@ impl Kubectl {
                     "name": "restic",
                     "image": "restic/restic:latest",
                     "args": ["snapshots", "--json"],
-                    "envFrom": [{ "secretRef": { "name": self.source_secret_name(app) }}]
+                    "envFrom": [{ "secretRef": { "name": secret_name }}]
                 }]
             }
         });
@@ -574,7 +577,7 @@ impl Kubectl {
     pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
 
-        let hr_url = format!("/apis/source.toolkit.fluxcd.io/v1beta2/namespaces/{}/helmreleases/{}", ns, app);
+        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": true } }))).await {
             tracing::warn!("trigger_restore HelmRelease suspend failed for app={} (non-Flux apps can ignore this): {}", app, e);
         } else {
@@ -700,7 +703,7 @@ impl Kubectl {
             tracing::info!("resume_restore scaled deployment {} back to {} replicas", app, replicas);
         }
 
-        let hr_url = format!("/apis/source.toolkit.fluxcd.io/v1beta2/namespaces/{}/helmreleases/{}", ns, app);
+        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
             tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", app, e);
         } else {

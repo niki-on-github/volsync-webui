@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { api } from "@/api";
 import type { App, Snapshot } from "@/types";
 import { Button } from "@/components/ui/button";
@@ -10,12 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-} from "@/components/ui/card";
+import { Card, CardHeader, CardContent } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -24,11 +19,56 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { RefreshCw, Play, RotateCcw } from "lucide-react";
+import {
+  RefreshCw,
+  Play,
+  RotateCcw,
+  Clock,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
 
 interface Props {
   app: App;
   onBackupComplete: () => void;
+}
+
+function Section({ title, children }: { title: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="border-t border-border pt-4 first:border-t-0 first:pt-0">
+      <h4 className="flex items-center gap-2 text-sm font-semibold text-foreground mb-3">
+        {title}
+      </h4>
+      {children}
+    </div>
+  );
+}
+
+function AppHeader({ app }: { app: App }) {
+  const resultOk = app.last_result?.toLowerCase() === "successful";
+  return (
+    <div className="flex items-start justify-between">
+      <div>
+        <h3 className="text-lg font-semibold leading-none tracking-tight">
+          {app.name}
+        </h3>
+        <p className="text-sm text-muted-foreground mt-1">{app.namespace}</p>
+      </div>
+      <div className="flex items-center gap-2">
+        {app.paused && <Badge variant="outline">Paused</Badge>}
+        {app.in_progress ? (
+          <Badge variant="secondary">
+            <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> Running
+          </Badge>
+        ) : app.last_result ? (
+          <Badge variant={resultOk ? "success" : "destructive"}>
+            {resultOk ? <CheckCircle2 className="mr-1 h-3 w-3" /> : <XCircle className="mr-1 h-3 w-3" />}
+            {resultOk ? "OK" : "Failed"}
+          </Badge>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 export function AppDetail({ app, onBackupComplete }: Props) {
@@ -37,17 +77,16 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [timestamp, setTimestamp] = useState("");
-  const [status, setStatus] = useState("");
-  const mounted = useRef(true);
-
-  useEffect(() => {
-    return () => { mounted.current = false; };
-  }, []);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
 
   useEffect(() => {
     setTimestamp("");
-    setStatus("");
+    setBackupStatus(null);
+    setRestoreStatus(null);
     setSnapshots([]);
+    setSnapshotError(null);
     let cancelled = false;
     setLoadingSnapshots(true);
     api.getSnapshots(app.name, app.namespace)
@@ -55,7 +94,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
       .catch((e: Error) => {
         if (!cancelled) {
           setSnapshots([]);
-          setStatus(`Failed to load snapshots: ${e.message}`);
+          setSnapshotError(e.message);
         }
       })
       .finally(() => { if (!cancelled) setLoadingSnapshots(false); });
@@ -65,14 +104,14 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const handleBackup = async () => {
     if (backingUp) return;
     setBackingUp(true);
-    setStatus("Starting backup...");
+    setBackupStatus("Starting backup...");
     try {
       const r = await api.triggerBackup(app.name, app.namespace);
       const ok = r.result?.toLowerCase() === "successful";
-      setStatus(ok ? "Backup completed successfully" : `Backup failed: ${r.result ?? "unknown"}`);
+      setBackupStatus(ok ? "Backup completed successfully" : `Backup failed: ${r.result ?? "unknown"}`);
       onBackupComplete();
     } catch (e) {
-      setStatus(`Backup error: ${e instanceof Error ? e.message : String(e)}`);
+      setBackupStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBackingUp(false);
     }
@@ -81,7 +120,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const handleRestore = async () => {
     if (restoring) return;
     setRestoring(true);
-    setStatus("Starting restore...");
+    setRestoreStatus("Starting restore...");
     const trigger = `restore-${Date.now()}`;
     try {
       const r = await api.triggerRestore(
@@ -91,116 +130,76 @@ export function AppDetail({ app, onBackupComplete }: Props) {
         timestamp === "__latest__" ? undefined : timestamp,
       );
       const ok = r.result?.toLowerCase() === "successful";
-      setStatus(ok ? "Restore completed successfully" : `Restore result: ${r.result ?? "unknown"}`);
+      setRestoreStatus(ok ? "Restore completed successfully" : `Restore result: ${r.result ?? "unknown"}`);
     } catch (e) {
-      setStatus(`Restore error: ${e instanceof Error ? e.message : String(e)}`);
+      setRestoreStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRestoring(false);
     }
   };
 
-  const resultOk = app.last_result?.toLowerCase() === "successful";
-
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center justify-between">
-          <span>
-            {app.name}
-            <span className="ml-2 text-sm font-normal text-muted-foreground">
-              ({app.namespace})
-            </span>
-          </span>
-          {app.in_progress && (
-            <Badge variant="secondary" className="ml-2">
-              <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> Running
-            </Badge>
-          )}
-        </CardTitle>
+        <AppHeader app={app} />
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Status summary */}
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div>
-            <span className="text-muted-foreground">Last backup:</span>{" "}
-            {app.last_sync_time
-              ? new Date(app.last_sync_time).toLocaleString()
-              : "-"}
+
+        {/* ── Backup Section ── */}
+        <Section title={
+          <><Play className="h-4 w-4" /> Backup</>
+        }>
+          <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+            <div className="text-muted-foreground">Last backup:</div>
+            <div>
+              {app.last_sync_time
+                ? new Date(app.last_sync_time).toLocaleString()
+                : "-"}
+            </div>
+            <div className="text-muted-foreground">Duration:</div>
+            <div>{app.last_sync_duration ?? "-"}</div>
+            <div className="text-muted-foreground">Result:</div>
+            <div>
+              {app.last_result ? (
+                <Badge
+                  variant={
+                    app.last_result.toLowerCase() === "successful"
+                      ? "success"
+                      : "destructive"
+                  }
+                >
+                  {app.last_result}
+                </Badge>
+              ) : (
+                "-"
+              )}
+            </div>
+            <div className="text-muted-foreground">Next backup:</div>
+            <div>
+              {app.next_sync_time
+                ? new Date(app.next_sync_time).toLocaleString()
+                : "-"}
+            </div>
           </div>
-          <div>
-            <span className="text-muted-foreground">Duration:</span>{" "}
-            {app.last_sync_duration ?? "-"}
-          </div>
-          <div>
-            <span className="text-muted-foreground">Result:</span>{" "}
-            {app.last_result ? (
-              <Badge variant={resultOk ? "default" : "destructive"} className="ml-1">
-                {resultOk ? "Successful" : app.last_result}
-              </Badge>
-            ) : (
-              "-"
+          <div className="flex items-center gap-3">
+            <Button onClick={handleBackup} disabled={backingUp} size="sm">
+              <Play className="mr-1 h-4 w-4" />
+              {backingUp ? "Backing up..." : "Backup Now"}
+            </Button>
+            {backupStatus && (
+              <span className="text-sm text-muted-foreground">{backupStatus}</span>
             )}
           </div>
-          <div>
-            <span className="text-muted-foreground">Next backup:</span>{" "}
-            {app.next_sync_time
-              ? new Date(app.next_sync_time).toLocaleString()
-              : "-"}
-          </div>
-          {app.paused && (
-            <div className="col-span-2">
-              <Badge variant="outline">Paused</Badge>
-            </div>
-          )}
-        </div>
+        </Section>
 
-        {/* Actions */}
-        <div className="flex gap-2">
-          <Button onClick={handleBackup} disabled={backingUp} size="sm">
-            <Play className="mr-1 h-4 w-4" />
-            {backingUp ? "Backing up..." : "Backup Now"}
-          </Button>
-          <Button
-            onClick={handleRestore}
-            disabled={restoring || !timestamp || timestamp === "__latest__"}
-            size="sm"
-            variant="destructive"
-          >
-            <RotateCcw className="mr-1 h-4 w-4" />
-            {restoring ? "Restoring..." : "Restore"}
-          </Button>
-        </div>
-
-        {/* Restore snapshot selector */}
-        <div>
-          <label className="block text-sm font-medium text-muted-foreground mb-1">
-            Select snapshot to restore
-          </label>
-          <Select value={timestamp} onValueChange={setTimestamp}>
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="Choose a snapshot..." />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__latest__">Latest (no timestamp)</SelectItem>
-              {snapshots.map((snap) => (
-                <SelectItem key={snap.id} value={snap.time}>
-                  {snap.id.substring(0, 12)} — {new Date(snap.time).toLocaleString()}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Status message */}
-        {status && (
-          <p className="text-sm text-muted-foreground">{status}</p>
-        )}
-
-        {/* Snapshots list */}
-        <div>
-          <h4 className="text-sm font-medium text-muted-foreground mb-2">Snapshots</h4>
+        {/* ── Snapshots Section ── */}
+        <Section title={
+          <><Clock className="h-4 w-4" /> Snapshots</>
+        }>
           {loadingSnapshots ? (
             <p className="text-sm text-muted-foreground">Loading snapshots...</p>
+          ) : snapshotError ? (
+            <p className="text-sm text-destructive">Failed: {snapshotError}</p>
           ) : snapshots.length === 0 ? (
             <p className="text-sm text-muted-foreground">No snapshots found</p>
           ) : (
@@ -215,12 +214,18 @@ export function AppDetail({ app, onBackupComplete }: Props) {
               <TableBody>
                 {snapshots.map((snap) => (
                   <TableRow key={snap.id}>
-                    <TableCell className="font-mono text-xs">{snap.id.substring(0, 12)}</TableCell>
-                    <TableCell>{new Date(snap.time).toLocaleString()}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      {snap.id.substring(0, 12)}
+                    </TableCell>
+                    <TableCell>
+                      {new Date(snap.time).toLocaleString()}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
                         {snap.tags.map((tag) => (
-                          <Badge key={tag} variant="secondary">{tag}</Badge>
+                          <Badge key={tag} variant="secondary">
+                            {tag}
+                          </Badge>
                         ))}
                       </div>
                     </TableCell>
@@ -229,7 +234,51 @@ export function AppDetail({ app, onBackupComplete }: Props) {
               </TableBody>
             </Table>
           )}
-        </div>
+        </Section>
+
+        {/* ── Restore Section ── */}
+        <Section title={
+          <><RotateCcw className="h-4 w-4" /> Restore</>
+        }>
+          <div className="mb-3">
+            <label className="block text-sm text-muted-foreground mb-1">
+              Select snapshot to restore from
+            </label>
+            <Select value={timestamp} onValueChange={setTimestamp}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Choose a snapshot..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__latest__">Latest (no timestamp)</SelectItem>
+                {snapshots.map((snap) => (
+                  <SelectItem key={snap.id} value={snap.time}>
+                    {snap.id.substring(0, 12)} —{" "}
+                    {new Date(snap.time).toLocaleString()}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={handleRestore}
+              disabled={
+                restoring || !timestamp || timestamp === "__latest__"
+              }
+              size="sm"
+              variant="destructive"
+            >
+              <RotateCcw className="mr-1 h-4 w-4" />
+              {restoring ? "Restoring..." : "Restore"}
+            </Button>
+            {restoreStatus && (
+              <span className="text-sm text-muted-foreground">
+                {restoreStatus}
+              </span>
+            )}
+          </div>
+        </Section>
+
       </CardContent>
     </Card>
   );

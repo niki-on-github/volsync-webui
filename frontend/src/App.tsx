@@ -3,8 +3,6 @@ import { api } from "@/api";
 import type { App, AppConfig } from "@/types";
 import { AppsTable } from "@/components/apps-table";
 import { AppDetail } from "@/components/app-detail";
-import { RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 export default function App() {
   const [apps, setApps] = useState<App[]>([]);
@@ -49,10 +47,6 @@ export default function App() {
       <header className="border-b px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-bold text-primary">VolSync WebUI</h1>
-          <Button variant="outline" size="sm" onClick={loadApps} disabled={refreshing}>
-            <RefreshCw className={`mr-1 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            {refreshing ? "Refreshing..." : "Refresh"}
-          </Button>
         </div>
       </header>
 

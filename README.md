@@ -166,7 +166,7 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
     verbs: ["get", "list", "patch"]
-  - apiGroups: ["source.toolkit.fluxcd.io"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
     verbs: ["get", "list", "patch"]
 ```
@@ -180,8 +180,6 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 | `RUST_LOG` | `debug` | Logging level (trace, debug, info, warn, error) |
 | `KUBERNETES_SERVICE_HOST` | auto-detected | Kubernetes API server host |
 | `VOLSYNC_API_GROUP` | `volsync.backube` | API group for VolSync CRDs (set to `replication.storage.io` for older clusters) |
-| `VOLSYNC_SOURCE_SECRET_SUFFIX` | `-volsync-secret` | Suffix for ReplicationSource secrets (e.g., `{app}-volsync-secret`) |
-| `VOLSYNC_DEST_SECRET_SUFFIX` | `-volsync-secret` | Suffix for ReplicationDestination secrets |
 | `REFRESH_INTERVAL_SECS` | `3600` | Frontend auto-refresh interval in seconds (1 hour default) |
 | `BACKUP_ALL_CONCURRENCY` | `5` | Max concurrent backups for backup-all |
 | `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
@@ -202,7 +200,7 @@ env:
 
 - Tested with Kubernetes 1.25+
 - Uses `volsync.backube/v1alpha1` for VolSync CRDs (configurable via `VOLSYNC_API_GROUP`)
-- Uses `source.toolkit.fluxcd.io/v1beta2` for HelmRelease (optional, for Flux-based apps)
+- Uses `helm.toolkit.fluxcd.io/v2` for HelmRelease (optional, for Flux-based apps)
 
 ## Security Considerations
 
@@ -210,7 +208,7 @@ env:
 2. **ClusterRole**: Requires broad read access — restrict in production
 3. **No TLS**: Backend runs HTTP; TLS should be handled by ingress/controller
 4. **No Authentication**: Currently no auth — expose via auth proxy (e.g., OAuth2 proxy) in production
-5. **Secret Access**: Reads secrets named `{app}{VOLSYNC_SOURCE_SECRET_SUFFIX}` (default: `{app}-volsync-secret`) in app namespaces
+5. **Secret Access**: Reads the actual secret name from `spec.restic.repository` on each ReplicationSource at snapshot time, so it always uses the correct credentials regardless of naming convention
 
 ## License
 
