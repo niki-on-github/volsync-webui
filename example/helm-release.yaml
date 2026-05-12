@@ -31,18 +31,21 @@ spec:
           enabled: true
           type: ClusterRole
           rules:
-            - apiGroups: ["replication.storage.io"]
+            - apiGroups: ["volsync.backube"]
               resources: ["replicationsources", "replicationdestinations"]
-              verbs: ["get", "list", "patch"]
+              verbs: ["get", "list", "patch", "watch"]
             - apiGroups: [""]
-              resources: ["pods", "secrets"]
+              resources: ["pods", "pods/log"]
               verbs: ["get", "list", "create", "delete"]
             - apiGroups: [""]
               resources: ["namespaces"]
               verbs: ["get", "list"]
-            - apiGroups: ["source.toolkit.fluxcd.io"]
+            - apiGroups: ["apps"]
+              resources: ["deployments", "deployments/scale"]
+              verbs: ["get", "list", "patch"]
+            - apiGroups: ["helm.toolkit.fluxcd.io"]
               resources: ["helmreleases"]
-              verbs: ["get", "patch", "suspend", "resume"]
+              verbs: ["get", "list", "patch"]
       bindings:
         volsync-webui:
           enabled: true
@@ -58,7 +61,11 @@ spec:
           app:
             image:
               repository: ghcr.io/niki-on-github/volsync-webui
-              tag: "v0.0.1@sha256:fdcc160d9266b9c88e3d2ae38f3b1f78cd3113fbc317ad3415709ba595c4a5ad"
+              tag: "v0.0.2"
+            env:
+              VOLSYNC_API_GROUP: "volsync.backube"
+              VOLSYNC_SOURCE_SUFFIX: "-backup"
+              VOLSYNC_DEST_SUFFIX: "-bootstrap"
 
     service:
       webui:
