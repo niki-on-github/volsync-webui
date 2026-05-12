@@ -745,6 +745,7 @@ impl Kubectl {
             if start.elapsed() > Duration::from_secs(restore_timeout) {
                 // Resume deployment and HelmRelease before returning error
                 tracing::warn!("trigger_restore polling timed out after {} polls for app={}", poll_count, app);
+                self.clear_restore_trigger(&dst_url).await;
                 self.resume_restore(app, ns, original_replicas).await;
                 return Err(KubeError::Timeout("Restore polling timed out".to_string()));
             }
@@ -767,6 +768,7 @@ impl Kubectl {
                     if finished {
                         tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
                         // Resume deployment and HelmRelease
+                        self.clear_restore_trigger(&dst_url).await;
                         self.resume_restore(app, ns, original_replicas).await;
                         return Ok(RestoreResponse {
                             trigger: trigger.to_string(),
@@ -776,6 +778,7 @@ impl Kubectl {
                     } else {
                         // Restore didn't succeed — resume and return error
                         tracing::warn!("trigger_restore failed on poll #{} for app={}: result={:?}", poll_count, app, result);
+                        self.clear_restore_trigger(&dst_url).await;
                         self.resume_restore(app, ns, original_replicas).await;
                         return Err(KubeError::SnapshotFailed(format!(
                             "Restore failed with result: {:?}", result
@@ -787,6 +790,17 @@ impl Kubectl {
             if poll_count % 15 == 0 {
                 tracing::debug!("trigger_restore poll #{} for app={} (still waiting)", poll_count, app);
             }
+        }
+    }
+
+    async fn clear_restore_trigger(&self, dst_url: &str) {
+        if let Err(e) = self.request("PATCH", dst_url, Some(serde_json::json!({
+            "spec": {
+                "trigger": { "manual": serde_json::Value::Null },
+                "restic": { "restoreAsOf": serde_json::Value::Null }
+            }
+        }))).await {
+            tracing::warn!("clear_restore_trigger failed: {}", e);
         }
     }
 

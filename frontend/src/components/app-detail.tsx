@@ -5,6 +5,17 @@ import { formatDateTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
+  AlertDialog,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -83,6 +94,10 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
   const [destRepo, setDestRepo] = useState<string | null>(null);
   const [destLoaded, setDestLoaded] = useState(false);
+
+  const selectedSnap = timestamp && timestamp !== "__latest__"
+    ? snapshots.find(s => s.time === timestamp)
+    : null;
 
   useEffect(() => {
     setTimestamp("");
@@ -286,17 +301,36 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             </Select>
           </div>
           <div className="flex items-center gap-3">
-            <Button
-              onClick={handleRestore}
-              disabled={
-                restoring || !timestamp
-              }
-              size="sm"
-              variant="destructive"
-            >
-              <RotateCcw className="mr-1 h-4 w-4" />
-              {restoring ? "Restoring..." : "Restore"}
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  disabled={restoring || !timestamp}
+                  size="sm"
+                  variant="destructive"
+                >
+                  <RotateCcw className="mr-1 h-4 w-4" />
+                  {restoring ? "Restoring..." : "Restore"}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Confirm Restore</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Do you really want to restore{" "}
+                    {selectedSnap
+                      ? `${selectedSnap.short_id} — ${formatDateTime(selectedSnap.time)}`
+                      : "the selected snapshot"}
+                    ?
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>No</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleRestore} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                    Yes
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
             {restoreStatus && (
               <span className="text-sm text-muted-foreground">
                 {restoreStatus}
