@@ -1,3 +1,4 @@
+import { formatDateTime } from "@/lib/utils";
 import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { App } from "@/types";
@@ -38,8 +39,7 @@ const SORT_COLUMNS: SortKey[] = [
 
 function formatTime(iso: string | null): string {
   if (!iso) return "-";
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return formatDateTime(iso);
 }
 
 function formatDuration(secs: string | null): string {

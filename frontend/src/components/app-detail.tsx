@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "@/api";
 import type { App, Snapshot } from "@/types";
+import { formatDateTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -171,7 +172,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             <div className="text-muted-foreground">Last backup:</div>
             <div>
               {app.last_sync_time
-                ? new Date(app.last_sync_time).toLocaleString()
+                ? formatDateTime(app.last_sync_time)
                 : "-"}
             </div>
             <div className="text-muted-foreground">Duration:</div>
@@ -195,7 +196,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             <div className="text-muted-foreground">Next backup:</div>
             <div>
               {app.next_sync_time
-                ? new Date(app.next_sync_time).toLocaleString()
+                ? formatDateTime(app.next_sync_time)
                 : "-"}
             </div>
             <div className="text-muted-foreground">Repository:</div>
@@ -238,7 +239,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                     <TableRow key={snap.id}>
                       <TableCell className="font-mono text-xs">{snap.short_id}</TableCell>
                       <TableCell className="whitespace-nowrap text-xs">
-                        {new Date(snap.time).toLocaleString()}
+                        {formatDateTime(snap.time)}
                       </TableCell>
                       <TableCell className="text-xs whitespace-nowrap">
                         <span className="text-green-400" title="new">+{snap.files_new}</span>{" "}
@@ -278,7 +279,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                 {snapshots.map((snap) => (
                   <SelectItem key={snap.id} value={snap.time}>
                     {snap.id.substring(0, 12)} —{" "}
-                    {new Date(snap.time).toLocaleString()}
+                    {formatDateTime(snap.time)}
                   </SelectItem>
                 ))}
               </SelectContent>
