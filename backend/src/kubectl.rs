@@ -64,6 +64,7 @@ pub struct Kubectl {
     client: Client,
     base_url: String,
     secret_suffix: String,
+    api_group: String,
     token: Option<String>,
 }
 
@@ -75,6 +76,9 @@ impl Kubectl {
 
         let secret_suffix = std::env::var("VOLSYNC_SECRET_SUFFIX")
             .unwrap_or_else(|_| "-volsync-secret".to_string());
+
+        let api_group = std::env::var("VOLSYNC_API_GROUP")
+            .unwrap_or_else(|_| "volsync.backube".to_string());
 
         let token_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token");
         let token = if token_path.exists() {
@@ -111,7 +115,8 @@ impl Kubectl {
                     client
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to read CA certificate: {}, using default client", e);
+                    tracing::error!("Failed to read CA certificate: {}, using unauthenticated client", e);
+                    tracing::warn!("Kubernetes API calls will not use TLS client certificates");
                     client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
                 }
             }
@@ -120,7 +125,7 @@ impl Kubectl {
             client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
         };
 
-        Ok(Self { client, base_url, secret_suffix, token })
+        Ok(Self { client, base_url, secret_suffix, api_group, token })
     }
 
     fn secret_name(&self, app: &str) -> String {
@@ -210,8 +215,8 @@ impl Kubectl {
         tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
 
         let api_path = match namespace {
-            Some(ns) => format!("/apis/replication.storage.io/v1alpha1/namespaces/{}/replicationsources", ns),
-            None => "/apis/replication.storage.io/v1alpha1/replicationsources".to_string(),
+            Some(ns) => format!("/apis/{}/namespaces/{}/replicationsources", self.api_group, ns),
+            None => format!("/apis/{}/replicationsources", self.api_group),
         };
         let resp: Value = self.request("GET", &api_path, None).await?;
 
@@ -254,8 +259,8 @@ impl Kubectl {
         tracing::info!("trigger_backup starting for app={} namespace={}", app, ns);
 
         let url = format!(
-            "/apis/replication.storage.io/v1alpha1/namespaces/{}/replicationsources/{}",
-            ns, app
+            "/apis/{}/namespaces/{}/replicationsources/{}",
+            self.api_group, ns, app
         );
 
         let patch = serde_json::json!({
@@ -426,9 +431,10 @@ impl Kubectl {
         loop {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(pod_startup_timeout_secs()) {
-                // Clean up failed pod before returning error
                 tracing::warn!("get_snapshots pod {} timed out after {} polls", pod_name, poll_count);
-                let _ = self.request("DELETE", &pod_url, None).await;
+                if let Err(e) = self.request("DELETE", &pod_url, None).await {
+                    tracing::warn!("get_snapshots failed to clean up timed-out pod {}: {}", pod_name, e);
+                }
                 return Err(KubeError::Timeout("Pod startup timed out".to_string()));
             }
 
@@ -446,9 +452,10 @@ impl Kubectl {
                                 break;
                             }
                             "Failed" => {
-                                // Clean up failed pod before returning error
                                 tracing::warn!("get_snapshots pod {} failed after {} polls", pod_name, poll_count);
-                                let _ = self.request("DELETE", &pod_url, None).await;
+                                if let Err(e) = self.request("DELETE", &pod_url, None).await {
+                                    tracing::warn!("get_snapshots failed to clean up failed pod {}: {}", pod_name, e);
+                                }
                                 return Err(KubeError::SnapshotFailed("Pod failed".to_string()));
                             }
                             _ => {}
@@ -481,10 +488,9 @@ impl Kubectl {
     pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
 
-        // Suspend HelmRelease — propagate error if it fails (resource may not exist for non-Flux apps)
         let hr_url = format!("/apis/source.toolkit.fluxcd.io/v1beta2/namespaces/{}/helmreleases/{}", ns, app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": true } }))).await {
-            tracing::debug!("trigger_restore HelmRelease suspend skipped (may not exist): {}", e);
+            tracing::warn!("trigger_restore HelmRelease suspend failed for app={} (non-Flux apps can ignore this): {}", app, e);
         } else {
             tracing::info!("trigger_restore HelmRelease suspended for app={}", app);
         }
@@ -500,22 +506,22 @@ impl Kubectl {
                 replicas
             }
             Err(e) => {
-                tracing::debug!("trigger_restore Deployment read skipped (may not exist): {}", e);
+                tracing::warn!("trigger_restore Deployment read failed for app={} (non-Flux apps can ignore this): {}", app, e);
                 None
             }
         };
 
         let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, app);
         if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": 0 } }))).await {
-            tracing::debug!("trigger_restore Deployment scale-down skipped (may not exist): {}", e);
+            tracing::warn!("trigger_restore Deployment scale-down failed for app={} (non-Flux apps can ignore this): {}", app, e);
         } else {
             tracing::info!("trigger_restore deployment scaled to 0 for app={}", app);
         }
 
         let dst_name = format!("{}-dst", app);
         let dst_url = format!(
-            "/apis/replication.storage.io/v1alpha1/namespaces/{}/replicationdestinations/{}",
-            ns, dst_name
+            "/apis/{}/namespaces/{}/replicationdestinations/{}",
+            self.api_group, ns, dst_name
         );
 
         let mut restic_spec = serde_json::json!({});

@@ -2,4 +2,6 @@ target/
 pkg/
 dist/
 *.wasm
+node_modules/
+*.tsbuildinfo
 .next/

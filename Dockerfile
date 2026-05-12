@@ -12,30 +12,20 @@ RUN apt-get update && apt-get install -y \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Install trunk and wasm target for frontend build
-RUN rustup target add wasm32-unknown-unknown && \
-    cargo install trunk --version 0.21.14 && \
-    cargo install wasm-bindgen-cli --version 0.2.121
+# Copy frontend source for layer caching
+COPY frontend/package.json frontend/package-lock.json frontend/
 
-# Copy workspace Cargo files first for layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY backend/Cargo.toml backend/
-COPY frontend/Cargo.toml frontend/
-
-# Copy source
-COPY backend/src backend/src/
-COPY frontend/src frontend/src/
-COPY frontend/index.html frontend/
-COPY frontend/style.css frontend/
-COPY frontend/Trunk.toml frontend/
-COPY frontend/tailwind.config.js frontend/
-
-# Build frontend with trunk (produces frontend/dist/)
+# Build frontend with Vite (produces frontend/dist/)
 WORKDIR /app/frontend
-RUN trunk build --release
+RUN npm ci
+COPY frontend/ .
+RUN npx tsc -b && npx vite build
 
 # Build backend release binary
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY backend/Cargo.toml backend/
+COPY backend/src backend/src/
 RUN cargo build --release --bin volsync-webui-backend
 
 # ---- Final stage ----

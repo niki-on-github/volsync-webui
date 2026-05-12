@@ -57,8 +57,8 @@ async fn serve_index() -> Response {
                 .body(Body::from(contents))
                 .unwrap()
         }
-        Err(_) => {
-            tracing::warn!("index.html not found in public/ directory");
+        Err(e) => {
+            tracing::error!("index.html not found in public/ directory: {}", e);
             Response::builder()
                 .status(404)
                 .body(Body::from("Not found"))
