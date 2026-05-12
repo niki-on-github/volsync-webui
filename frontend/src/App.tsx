@@ -28,6 +28,21 @@ export default function App() {
     }
   };
 
+  const pollSilently = async () => {
+    try {
+      const a = await api.listApps();
+      setApps(a);
+    } catch { /* silent */ }
+  };
+
+  const handleBackupComplete = async () => {
+    await loadApps();
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      await pollSilently();
+    }
+  };
+
   // Initial fetch: config + apps
   useEffect(() => {
     api.getConfig()
@@ -71,7 +86,7 @@ export default function App() {
           </div>
           <div>
             {selectedApp ? (
-              <AppDetail app={selectedApp} onBackupComplete={loadApps} />
+              <AppDetail app={selectedApp} onBackupComplete={handleBackupComplete} />
             ) : (
               <div className="rounded-lg border bg-card text-card-foreground p-6">
                 <p className="text-sm text-muted-foreground">

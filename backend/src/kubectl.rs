@@ -593,9 +593,12 @@ impl Kubectl {
             tracing::debug!("get_snapshots pod {} cleaned up", pod_name);
         }
 
-        let snapshot_count = parse_snapshots(&logs).map(|s| s.len()).unwrap_or(0);
-        tracing::info!("get_snapshots returning {} snapshots for app={}", snapshot_count, app);
-        parse_snapshots(&logs)
+        let snapshots = parse_snapshots(&logs)?;
+        if snapshots.is_empty() {
+            tracing::warn!("get_snapshots: 0 snapshots for app={}. Raw log ({} bytes): {}", app, logs.len(), &logs[..logs.len().min(1000)]);
+        }
+        tracing::info!("get_snapshots returning {} snapshots for app={}", snapshots.len(), app);
+        Ok(snapshots)
     }
 
     pub async fn get_dest_repository(&self, app: &str, ns: &str) -> Result<Option<String>, KubeError> {
@@ -765,48 +768,61 @@ fn is_successful(result: &Option<String>) -> bool {
 }
 
 fn parse_snapshots(logs: &str) -> Result<Vec<Snapshot>, KubeError> {
+    let parse_object = |snap: &Value| -> Option<Snapshot> {
+        let id = snap.get("id")?.as_str()?;
+        if id.is_empty() {
+            return None;
+        }
+        let summary = snap.get("summary");
+        Some(Snapshot {
+            id: id.to_string(),
+            short_id: snap.get("short_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            time: snap.get("time").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            tags: snap.get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            paths: snap.get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            hostname: snap.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            files_new: summary.and_then(|s| s.get("files_new")).and_then(|v| v.as_i64()).unwrap_or(0),
+            files_changed: summary.and_then(|s| s.get("files_changed")).and_then(|v| v.as_i64()).unwrap_or(0),
+            files_unmodified: summary.and_then(|s| s.get("files_unmodified")).and_then(|v| v.as_i64()).unwrap_or(0),
+            data_added: summary.and_then(|s| s.get("data_added")).and_then(|v| v.as_i64()).unwrap_or(0),
+            total_files_processed: summary.and_then(|s| s.get("total_files_processed")).and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+    };
+
+    // restic outputs a JSON array [{...},{...}]
+    if let Ok(arr) = serde_json::from_str::<Vec<Value>>(logs) {
+        let snapshots: Vec<Snapshot> = arr.iter().filter_map(parse_object).collect();
+        tracing::debug!("parse_snapshots: parsed {} snapshots from array ({} bytes)", snapshots.len(), logs.len());
+        return Ok(snapshots);
+    }
+
+    // Fallback: per-line NDJSON (some restic commands output one JSON object per line)
     let mut snapshots = Vec::new();
     for line in logs.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(snap) = serde_json::from_str::<Value>(line) {
-            let id = snap.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if id.is_empty() {
-                continue;
+            if let Some(s) = parse_object(&snap) {
+                snapshots.push(s);
             }
-            let short_id = snap.get("short_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let time_str = snap.get("time").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let hostname = snap.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let paths: Vec<String> = snap.get("paths")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let tags: Vec<String> = snap.get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let summary = snap.get("summary");
-            let files_new = summary.and_then(|s| s.get("files_new")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let files_changed = summary.and_then(|s| s.get("files_changed")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let files_unmodified = summary.and_then(|s| s.get("files_unmodified")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let data_added = summary.and_then(|s| s.get("data_added")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let total_files_processed = summary.and_then(|s| s.get("total_files_processed")).and_then(|v| v.as_i64()).unwrap_or(0);
-
-            snapshots.push(Snapshot {
-                id,
-                short_id,
-                time: time_str,
-                tags,
-                paths,
-                hostname,
-                files_new,
-                files_changed,
-                files_unmodified,
-                data_added,
-                total_files_processed,
-            });
         }
+    }
+
+    if snapshots.is_empty() && !logs.trim().is_empty() {
+        tracing::warn!(
+            "parse_snapshots: parsed 0 snapshots from {} bytes. First 500 chars: {}",
+            logs.len(),
+            &logs[..logs.len().min(500)]
+        );
+    } else {
+        tracing::debug!("parse_snapshots: parsed {} snapshots from NDJSON ({} bytes)", snapshots.len(), logs.len());
     }
     Ok(snapshots)
 }
