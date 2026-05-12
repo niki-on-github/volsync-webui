@@ -288,7 +288,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
               <SelectContent>
                 <SelectItem value="__latest__">Latest (no timestamp)</SelectItem>
                 {snapshots.map((snap) => (
-                  <SelectItem key={snap.id} value={snap.id}>
+                  <SelectItem key={snap.id} value={snap.time}>
                     {snap.id.substring(0, 12)} —{" "}
                     {new Date(snap.time).toLocaleString()}
                   </SelectItem>

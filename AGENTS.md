@@ -49,6 +49,9 @@ cd frontend && npm install && npm run dev
 # Build frontend for production
 cd frontend && npx tsc -b && npx vite build
 
+# Verify frontend (always run via nix devshell)
+nix develop --accept-flake-config --command bash -c "cd frontend && npx tsc -b --noEmit"
+
 # Format
 cargo fmt
 ```
