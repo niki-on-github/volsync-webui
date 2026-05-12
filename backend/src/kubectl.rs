@@ -672,7 +672,7 @@ impl Kubectl {
         }
     }
 
-    pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
+    pub async fn trigger_restore(&self, app: &str, ns: &str, _trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
         let base_app = self.app_base_name(app);
 
@@ -712,6 +712,16 @@ impl Kubectl {
             self.api_group, ns, dst_name
         );
 
+        // Read current spec.trigger.manual — this is the value Flux maintains as the desired state
+        let current_rd: Value = self.request("GET", &dst_url, None).await?;
+        let flux_trigger = current_rd.get("spec")
+            .and_then(|s| s.get("trigger"))
+            .and_then(|t| t.get("manual"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        tracing::debug!("trigger_restore current spec.trigger.manual='{}'", flux_trigger);
+
         let mut restic_spec = serde_json::json!({});
         if let Some(ts) = timestamp {
             if !ts.is_empty() {
@@ -719,20 +729,30 @@ impl Kubectl {
             }
         }
 
+        // PATCH only restoreAsOf — never touch spec.trigger.manual (Flux owns it)
         let dst_patch = serde_json::json!({
-            "spec": {
-                "trigger": { "manual": trigger },
-                "restic": restic_spec
-            }
+            "spec": { "restic": restic_spec }
         });
 
-        tracing::debug!("trigger_restore PATCHing ReplicationDestination with trigger={}", trigger);
+        tracing::debug!("trigger_restore PATCHing ReplicationDestination restoreAsOf");
         if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
             tracing::error!("trigger_restore failed to patch ReplicationDestination, rolling back: {}", e);
             self.resume_restore(app, ns, original_replicas).await;
             return Err(KubeError::Api(format!("Failed to patch ReplicationDestination: {}", e)));
         }
-        tracing::info!("trigger_restore ReplicationDestination updated, starting poll loop");
+
+        // Trigger restore by nullifying status.lastManualSync — VolSync will see
+        // spec.trigger.manual (Flux's value) != status.lastManualSync (null → "")
+        let status_url = format!("{}/status", dst_url);
+        tracing::debug!("trigger_restore resetting status.lastManualSync to trigger restore");
+        if let Err(e) = self.request("PATCH", &status_url, Some(serde_json::json!({
+            "status": { "lastManualSync": serde_json::Value::Null }
+        }))).await {
+            tracing::error!("trigger_restore failed to patch RD status, rolling back: {}", e);
+            self.resume_restore(app, ns, original_replicas).await;
+            return Err(KubeError::Api(format!("Failed to patch ReplicationDestination status: {}", e)));
+        }
+        tracing::info!("trigger_restore status.lastManualSync reset, waiting for VolSync to process");
 
         let restore_timeout = restore_timeout_secs();
         let poll_interval = polling_interval_secs();
@@ -743,9 +763,7 @@ impl Kubectl {
         loop {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(restore_timeout) {
-                // Resume deployment and HelmRelease before returning error
                 tracing::warn!("trigger_restore polling timed out after {} polls for app={}", poll_count, app);
-                self.clear_restore_trigger(&dst_url).await;
                 self.resume_restore(app, ns, original_replicas).await;
                 return Err(KubeError::Timeout("Restore polling timed out".to_string()));
             }
@@ -756,7 +774,7 @@ impl Kubectl {
             if let Some(last_sync) = dst.get("status")
                 .and_then(|s| s.get("lastManualSync"))
                 .and_then(|v| v.as_str()) {
-                if last_sync == trigger {
+                if last_sync == flux_trigger {
                     // Verify mover status before reporting completed
                     let result = dst.get("status")
                         .and_then(|s| s.get("latestMoverStatus"))
@@ -767,18 +785,15 @@ impl Kubectl {
                     let finished = result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
                         tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
-                        // Resume deployment and HelmRelease
-                        self.clear_restore_trigger(&dst_url).await;
+                        // Resume deployment and HelmRelease — no trigger cleanup needed
                         self.resume_restore(app, ns, original_replicas).await;
                         return Ok(RestoreResponse {
-                            trigger: trigger.to_string(),
+                            trigger: flux_trigger,
                             status: "completed".to_string(),
                             result,
                         });
                     } else {
-                        // Restore didn't succeed — resume and return error
                         tracing::warn!("trigger_restore failed on poll #{} for app={}: result={:?}", poll_count, app, result);
-                        self.clear_restore_trigger(&dst_url).await;
                         self.resume_restore(app, ns, original_replicas).await;
                         return Err(KubeError::SnapshotFailed(format!(
                             "Restore failed with result: {:?}", result
@@ -790,17 +805,6 @@ impl Kubectl {
             if poll_count % 15 == 0 {
                 tracing::debug!("trigger_restore poll #{} for app={} (still waiting)", poll_count, app);
             }
-        }
-    }
-
-    async fn clear_restore_trigger(&self, dst_url: &str) {
-        if let Err(e) = self.request("PATCH", dst_url, Some(serde_json::json!({
-            "spec": {
-                "trigger": { "manual": serde_json::Value::Null },
-                "restic": { "restoreAsOf": serde_json::Value::Null }
-            }
-        }))).await {
-            tracing::warn!("clear_restore_trigger failed: {}", e);
         }
     }
 
