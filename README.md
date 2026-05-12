@@ -39,7 +39,6 @@ volsync-webui/
 │       └── components/
 │           ├── apps-table.tsx  # Dashboard table with all apps
 │           ├── app-detail.tsx  # Detail panel with snapshots/backup/restore
-│           ├── snapshot-list.tsx
 │           └── ui/             # shadcn primitives (Button, Card, Select, Table, Badge)
 └── Dockerfile                  # Multi-stage container build
 ```
@@ -137,10 +136,13 @@ The container expects to run inside a Kubernetes cluster with access to the Kube
 
 ### Kubernetes
 
-Apply the RBAC configuration first, then deploy the container:
+Apply the RBAC configuration from the section below, then deploy the container:
 
 ```bash
-kubectl apply -f kube-manifests/rbac.yaml
+# Create the ClusterRole and ClusterRoleBinding (see RBAC section below)
+kubectl apply -f - <<EOF
+# ... paste the YAML from the RBAC section ...
+EOF
 kubectl apply -f your-deployment.yaml
 ```
 
@@ -187,6 +189,7 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 | `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
 | `POLL_INTERVAL_SECS` | `2` | Backup/restore poll interval in seconds |
 | `POD_STARTUP_TIMEOUT_SECS` | `60` | Snapshot pod startup timeout in seconds |
+| `RESTIC_IMAGE` | `restic/restic:latest` | Restic container image for snapshot pods |
 
 ### Suffix Configuration
 

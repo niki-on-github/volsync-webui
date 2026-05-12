@@ -9,6 +9,12 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      "/api": "http://localhost:8080",
+      "/health": "http://localhost:8080",
+    },
+  },
   build: {
     outDir: "dist",
   },

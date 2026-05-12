@@ -38,12 +38,8 @@ const SORT_COLUMNS: SortKey[] = [
 
 function formatTime(iso: string | null): string {
   if (!iso) return "-";
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString();
-  } catch {
-    return iso;
-  }
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
 function formatDuration(secs: string | null): string {
@@ -53,7 +49,7 @@ function formatDuration(secs: string | null): string {
 function sortValue(app: App, key: SortKey): string | number {
   if (key === "last_sync_duration") {
     const raw = app.last_sync_duration ?? "";
-    const num = parseFloat(raw);
+    const num = parseFloat(raw.replace(/[^0-9.]/g, ""));
     return isNaN(num) ? 0 : num;
   }
   const val = app[key];

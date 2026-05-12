@@ -95,10 +95,10 @@ export function AppDetail({ app, onBackupComplete }: Props) {
     setLoadingSnapshots(true);
     api.getSnapshots(app.name, app.namespace)
       .then((s) => { if (!cancelled) setSnapshots(s); })
-      .catch((e: Error) => {
+      .catch((e: unknown) => {
         if (!cancelled) {
           setSnapshots([]);
-          setSnapshotError(e.message);
+          setSnapshotError(e instanceof Error ? e.message : String(e));
         }
       })
       .finally(() => { if (!cancelled) setLoadingSnapshots(false); });
@@ -107,12 +107,16 @@ export function AppDetail({ app, onBackupComplete }: Props) {
 
   // Lazy-fetch destination repository
   useEffect(() => {
+    let cancelled = false;
     setDestRepo(null);
     setDestLoaded(false);
     api.getDestRepository(app.name, app.namespace).then((r) => {
-      setDestRepo(r);
-      setDestLoaded(true);
+      if (!cancelled) {
+        setDestRepo(r);
+        setDestLoaded(true);
+      }
     });
+    return () => { cancelled = true; };
   }, [app.name, app.namespace]);
 
   const handleBackup = async () => {
@@ -284,7 +288,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
               <SelectContent>
                 <SelectItem value="__latest__">Latest (no timestamp)</SelectItem>
                 {snapshots.map((snap) => (
-                  <SelectItem key={snap.id} value={snap.time}>
+                  <SelectItem key={snap.id} value={snap.id}>
                     {snap.id.substring(0, 12)} —{" "}
                     {new Date(snap.time).toLocaleString()}
                   </SelectItem>
@@ -296,7 +300,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             <Button
               onClick={handleRestore}
               disabled={
-                restoring || !timestamp || timestamp === "__latest__"
+                restoring || !timestamp
               }
               size="sm"
               variant="destructive"

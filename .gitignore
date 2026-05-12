@@ -5,3 +5,9 @@ dist/
 node_modules/
 *.tsbuildinfo
 .next/
+.env
+.env.*
+*.log
+.DS_Store
+.vscode/
+.idea/

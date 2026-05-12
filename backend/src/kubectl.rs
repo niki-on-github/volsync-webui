@@ -71,9 +71,17 @@ pub struct Kubectl {
 
 impl Kubectl {
     pub async fn new() -> Result<Self, KubeError> {
-        let base_url = std::env::var("KUBERNETES_SERVICE_HOST")
-            .map(|h| format!("https://{}:443", h))
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let host = std::env::var("KUBERNETES_SERVICE_HOST")
+            .unwrap_or_default();
+        let port = std::env::var("KUBERNETES_SERVICE_PORT")
+            .unwrap_or_else(|_| if host.is_empty() { "8080".to_string() } else { "443".to_string() });
+        let base_url = if host.is_empty() {
+            format!("http://localhost:{}", port)
+        } else if host.contains(':') {
+            format!("https://[{}]:{}", host, port)
+        } else {
+            format!("https://{}:{}", host, port)
+        };
 
         let api_group = std::env::var("VOLSYNC_API_GROUP")
             .unwrap_or_else(|_| "volsync.backube".to_string());
@@ -120,12 +128,24 @@ impl Kubectl {
                 Err(e) => {
                     tracing::error!("Failed to read CA certificate: {}, using unauthenticated client", e);
                     tracing::warn!("Kubernetes API calls will not use TLS client certificates");
-                    client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
+                    client_builder.build().unwrap_or_else(|_| {
+                        reqwest::Client::builder()
+                            .timeout(Duration::from_secs(30))
+                            .connect_timeout(Duration::from_secs(10))
+                            .build()
+                            .unwrap_or_else(|_| reqwest::Client::new())
+                    })
                 }
             }
         } else {
             tracing::info!("No CA certificate found at {}, using default client", ca_cert_path.display());
-            client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
+            client_builder.build().unwrap_or_else(|_| {
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .connect_timeout(Duration::from_secs(10))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new())
+            })
         };
 
         Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, token })
@@ -192,6 +212,16 @@ impl Kubectl {
 
                     if status == reqwest::StatusCode::NOT_FOUND {
                         return Err(KubeError::NotFound(format!("Resource not found at {}", path)));
+                    }
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        if attempt < max_retries - 1 {
+                            let delay = Duration::from_secs(1 << attempt);
+                            tracing::warn!("Rate limited (429) on {}, retrying in {}s", path, delay.as_secs());
+                            sleep(delay).await;
+                            last_err = Some(KubeError::Api(format!("Rate limited on {}", path)));
+                            continue;
+                        }
+                        return Err(KubeError::Api(format!("Rate limited on {} after {} retries", path, max_retries)));
                     }
                     if status.is_client_error() {
                         let text = resp.text().await.unwrap_or_default();
@@ -377,6 +407,7 @@ impl Kubectl {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(backup_timeout) {
                 tracing::warn!("trigger_backup polling timed out after {} polls for app={}", poll_count, app);
+                self.clear_manual_trigger(&url).await;
                 return Err(KubeError::Timeout("Backup polling timed out".to_string()));
             }
             sleep(Duration::from_secs(poll_interval)).await;
@@ -387,17 +418,20 @@ impl Kubectl {
                 .and_then(|s| s.get("lastManualSync"))
                 .and_then(|v| v.as_str()) {
                 if last_sync == trigger {
-                    tracing::info!("trigger_backup completed on poll #{} for app={}", poll_count, app);
-                    let result = rs.get("status")
+                    if let Some(result) = rs.get("status")
                         .and_then(|s| s.get("latestMoverStatus"))
                         .and_then(|m| m.get("result"))
                         .and_then(|v| v.as_str())
-                        .map(String::from);
-                    return Ok(BackupResponse {
-                        trigger: trigger.to_string(),
-                        status: "completed".to_string(),
-                        result,
-                    });
+                        .map(String::from) {
+                        tracing::info!("trigger_backup completed on poll #{} for app={}", poll_count, app);
+                        self.clear_manual_trigger(&url).await;
+                        return Ok(BackupResponse {
+                            trigger: trigger.to_string(),
+                            status: "completed".to_string(),
+                            result: Some(result),
+                        });
+                    }
+                    // mover hasn't reported result yet, keep polling
                 }
             }
 
@@ -415,12 +449,21 @@ impl Kubectl {
                             let is_error = reason.contains("Error") || reason.contains("Failed") || reason == "BackupFailed";
                             if is_error {
                                 tracing::warn!("trigger_backup detected failure on poll #{} for app={}: {}", poll_count, app, reason);
+                                self.clear_manual_trigger(&url).await;
                                 return Err(KubeError::SnapshotFailed(format!("Backup failed: {}", reason)));
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    async fn clear_manual_trigger(&self, url: &str) {
+        if let Err(e) = self.request("PATCH", url, Some(serde_json::json!({
+            "spec": { "trigger": { "manual": serde_json::Value::Null } }
+        }))).await {
+            tracing::warn!("clear_manual_trigger failed: {}", e);
         }
     }
 
@@ -529,7 +572,7 @@ impl Kubectl {
                 "restartPolicy": "Never",
                 "containers": [{
                     "name": "restic",
-                    "image": "restic/restic:latest",
+                    "image": std::env::var("RESTIC_IMAGE").unwrap_or_else(|_| "restic/restic:latest".to_string()),
                     "args": ["snapshots", "--json"],
                     "envFrom": [{ "secretRef": { "name": secret_name }}]
                 }]
@@ -618,10 +661,7 @@ impl Kubectl {
                 tracing::debug!("Destination CRD {} not found for app={}", dst_name, app);
                 Ok(None)
             }
-            Err(e) => {
-                tracing::warn!("Failed to fetch destination {} for app={}: {}", dst_name, app, e);
-                Ok(None)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -715,7 +755,7 @@ impl Kubectl {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
-                    let finished = result.as_deref().map_or(true, |r| r.eq_ignore_ascii_case("successful"));
+                    let finished = result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
                         tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
                         // Resume deployment and HelmRelease

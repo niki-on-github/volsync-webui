@@ -1,5 +1,5 @@
 {
-  description = "Volsync WebUI - Rust backend + Yew frontend";
+  description = "Volsync WebUI - Rust backend + React frontend";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
 
@@ -17,13 +17,9 @@
             buildInputs = with pkgs; [
               rustc
               cargo
-              trunk
-              wasm-bindgen-cli
               pkg-config
               openssl
               nodejs
-              llvmPackages.lld
-              kubernetes-helm
             ];
           };
         }

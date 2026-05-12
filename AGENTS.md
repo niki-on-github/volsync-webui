@@ -8,22 +8,25 @@ volsync-webui/
 │   └── src/
 │       ├── main.rs             # Entry point, router setup
 │       ├── api.rs              # HTTP handlers
-│       ├── kubectl.rs           # Kubernetes client (reqwest)
-│       └── models.rs            # Data structures
-├── frontend/                   # Yew WASM UI
+│       ├── kubectl.rs          # Kubernetes client (reqwest)
+│       └── models.rs           # Data structures
+├── frontend/                   # React + Vite + shadcn/ui
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tailwind.config.ts
+│   ├── tsconfig*.json
 │   └── src/
-│       ├── main.rs             # WASM entry point
-│       ├── lib.rs              # Exports AppComponent
-│       ├── api.rs              # Frontend fetch client
-│       └── components/          # UI components
-│           ├── app.rs
-│           ├── app_selector.rs
-│           ├── backup_panel.rs
-│           ├── restore_panel.rs
-│           ├── snapshot_list.rs
-│           └── namespace.rs
-├── kube-manifests/             # K8s YAML
-├── helm-charts/                # Helm chart
+│       ├── main.tsx
+│       ├── App.tsx
+│       ├── api.ts
+│       ├── types.ts
+│       ├── index.css
+│       ├── lib/utils.ts
+│       └── components/
+│           ├── ui/             # shadcn primitives
+│           ├── apps-table.tsx
+│           └── app-detail.tsx
 ├── flake.nix                   # Nix dev shell
 └── Dockerfile                  # Multi-stage build
 ```
@@ -36,22 +39,18 @@ cd volsync-webui
 # Enter dev shell
 nix develop --accept-flake-config
 
-# Check compilation (both crates)
-cargo check
-
-# Check individual crates
+# Backend
 cargo check -p volsync-webui-backend
-cargo check -p volsync-webui-frontend
-
-# Build
 cargo build -p volsync-webui-backend
-cargo build -p volsync-webui-frontend
+
+# Frontend
+cd frontend && npm install && npm run dev
+
+# Build frontend for production
+cd frontend && npx tsc -b && npx vite build
 
 # Format
 cargo fmt
-
-# Run tests (if any)
-cargo test
 ```
 
 ## Key Dependencies
@@ -62,56 +61,44 @@ cargo test
 - `reqwest` - HTTP client (Kubernetes API)
 - `serde`/`serde_json` - Serialization
 - `chrono` - Date/time
-- `tower`/`tower-http` - Middleware (CORS)
+- `tower-http` - CORS middleware
 
 ### Frontend
-- `yew 0.21` - WASM UI framework
-- `wasm-bindgen` - WASM bindings
-- `reqwasm` - WASM HTTP requests
-- `web-sys` - Web APIs
-- `log`/`wasm-logger` - Logging
+- `react 18` - UI framework
+- `vite 6` - Build tool
+- `tailwindcss 3` - CSS framework
+- `shadcn/ui` - Component library
+- `@radix-ui/react-select` - Select primitive
+- `lucide-react` - Icons
 
 ## Kubernetes API Paths
-
-The backend uses raw HTTP via reqwest to interact with K8s in-cluster:
 
 | Endpoint | Purpose |
 |----------|---------|
 | `/api/v1/namespaces` | List namespaces |
-| `/api/v1/namespaces/{ns}/secrets/{name}` | Get secrets |
-| `/api/v1/namespaces/{ns}/pods/{name}` | Pod operations |
-| `/apis/replication.storage.io/v1alpha1/replicationsources` | VolSync sources |
-| `/apis/source.toolkit.fluxcd.io/v1beta2/helmreleases` | Flux HelmReleases |
-
-## Frontend Build (Trunk)
-
-```bash
-# Install trunk and wasm-bindgen-cli first
-cargo install trunk wasm-bindgen-cli
-
-# Build WASM frontend
-cd frontend && trunk build
-
-# Output: frontend/dist/
-```
+| `/api/v1/namespaces/{ns}/pods` | Pod operations |
+| `/api/v1/namespaces/{ns}/pods/{name}/log` | Pod logs |
+| `/apis/volsync.backube/v1alpha1/replicationsources` | VolSync sources |
+| `/apis/volsync.backube/v1alpha1/replicationdestinations` | VolSync destinations |
+| `/apis/helm.toolkit.fluxcd.io/v2/helmreleases` | Flux HelmReleases |
+| `/apis/apps/v1/deployments` | Deployments |
 
 ## Docker Build
 
 ```bash
-docker build -t volsync-webui:latest volsync-webui/
+docker build -t volsync-webui:latest .
 docker run -p 8080:8080 volsync-webui:latest
 ```
 
 ## Code Conventions
 
-- Backend uses `thiserror` pattern for error enums
-- Frontend uses function components with hooks (`use_state`, `use_effect_with`)
+- Backend uses custom `KubeError` enum (not `thiserror`)
+- Frontend uses React function components with hooks
 - All API responses are JSON
 - Timestamp format: RFC3339 strings
-- Yew components use `#[function_component]` and `#[derive(Properties, Clone, PartialEq)]`
 
 ## Common Issues
 
 - **SSL errors**: System certs not in nix shell - use `nix develop --accept-flake-config`
-- **WASM build**: Need `wasm-bindgen-cli` in PATH
 - **K8s client**: Backend expects `KUBERNETES_SERVICE_HOST` env var (auto-set in cluster)
+- **Frontend dev**: Run backend on port 8080, Vite proxies `/api` requests automatically
