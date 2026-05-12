@@ -231,8 +231,6 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                     <TableHead>Time</TableHead>
                     <TableHead>Files</TableHead>
                     <TableHead>Data</TableHead>
-                    <TableHead>Host</TableHead>
-                    <TableHead>Tags</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -254,16 +252,6 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                             ? `${(snap.data_added / 1_000_000).toFixed(1)}MB`
                             : `${(snap.data_added / 1_000).toFixed(0)}KB`
                           : "-"}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{snap.hostname || "-"}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          {snap.tags.length > 0
-                            ? snap.tags.map((tag) => (
-                                <Badge key={tag} variant="secondary">{tag}</Badge>
-                              ))
-                            : <span className="text-muted-foreground text-xs">-</span>}
-                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
