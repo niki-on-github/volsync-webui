@@ -83,7 +83,7 @@ export default function App() {
             <NamespaceSelector
               selected={selectedNamespace}
               namespaces={namespaces}
-              onSelect={setSelectedNamespace}
+              onSelect={(val) => setSelectedNamespace(val === "__all__" ? "" : val)}
             />
             <AppSelector
               selected={selectedApp}

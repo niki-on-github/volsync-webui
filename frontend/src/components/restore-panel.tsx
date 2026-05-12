@@ -37,7 +37,7 @@ export function RestorePanel({ appName, ns, snapshots }: Props) {
         appName,
         ns,
         trigger,
-        timestamp || undefined,
+        timestamp === "__latest__" ? undefined : timestamp,
       );
       const success = r.result?.toLowerCase() === "successful";
       setStatus(
@@ -69,7 +69,7 @@ export function RestorePanel({ appName, ns, snapshots }: Props) {
               <SelectValue placeholder="Latest (no timestamp)" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Latest (no timestamp)</SelectItem>
+              <SelectItem value="__latest__">Latest (no timestamp)</SelectItem>
               {snapshots.map((snap) => (
                 <SelectItem key={snap.id} value={snap.time}>
                   {snap.id} - {snap.time}

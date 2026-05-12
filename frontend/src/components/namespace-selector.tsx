@@ -23,7 +23,7 @@ export function NamespaceSelector({ selected, namespaces, onSelect }: Props) {
           <SelectValue placeholder="All Namespaces" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="">All Namespaces</SelectItem>
+          <SelectItem value="__all__">All Namespaces</SelectItem>
           {namespaces.map((ns) => (
             <SelectItem key={ns} value={ns}>
               {ns}

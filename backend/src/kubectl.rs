@@ -215,8 +215,8 @@ impl Kubectl {
         tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
 
         let api_path = match namespace {
-            Some(ns) => format!("/apis/{}/namespaces/{}/replicationsources", self.api_group, ns),
-            None => format!("/apis/{}/replicationsources", self.api_group),
+            Some(ns) => format!("/apis/{}/v1alpha1/namespaces/{}/replicationsources", self.api_group, ns),
+            None => format!("/apis/{}/v1alpha1/replicationsources", self.api_group),
         };
         let resp: Value = self.request("GET", &api_path, None).await?;
 
@@ -259,7 +259,7 @@ impl Kubectl {
         tracing::info!("trigger_backup starting for app={} namespace={}", app, ns);
 
         let url = format!(
-            "/apis/{}/namespaces/{}/replicationsources/{}",
+            "/apis/{}/v1alpha1/namespaces/{}/replicationsources/{}",
             self.api_group, ns, app
         );
 
@@ -520,7 +520,7 @@ impl Kubectl {
 
         let dst_name = format!("{}-dst", app);
         let dst_url = format!(
-            "/apis/{}/namespaces/{}/replicationdestinations/{}",
+            "/apis/{}/v1alpha1/namespaces/{}/replicationdestinations/{}",
             self.api_group, ns, dst_name
         );
 
