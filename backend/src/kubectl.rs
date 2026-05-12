@@ -19,7 +19,7 @@ fn restore_timeout_secs() -> u64 {
     std::env::var("POLL_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(300)
+        .unwrap_or(900)
 }
 
 fn pod_startup_timeout_secs() -> u64 {
@@ -154,6 +154,13 @@ impl Kubectl {
     fn dest_crd_name(&self, app: &str) -> String {
         let base = app.strip_suffix(&self.source_suffix).unwrap_or(app);
         format!("{}{}", base, self.dest_suffix)
+    }
+
+    fn app_base_name(&self, app: &str) -> String {
+        app.strip_suffix(&self.source_suffix)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(app)
+            .to_string()
     }
 
     pub async fn check_rbac(&self) {
@@ -667,35 +674,36 @@ impl Kubectl {
 
     pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
+        let base_app = self.app_base_name(app);
 
-        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, app);
+        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, base_app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": true } }))).await {
-            tracing::warn!("trigger_restore HelmRelease suspend failed for app={} (non-Flux apps can ignore this): {}", app, e);
+            tracing::warn!("trigger_restore HelmRelease suspend failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
         } else {
-            tracing::info!("trigger_restore HelmRelease suspended for app={}", app);
+            tracing::info!("trigger_restore HelmRelease suspended for app={}", base_app);
         }
 
         // Scale deployment to 0 — but first read the original replica count so we can restore it
-        let deploy_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, app);
+        let deploy_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, base_app);
         let original_replicas: Option<i64> = match self.request("GET", &deploy_url, None).await {
             Ok(deploy) => {
                 let replicas = deploy.get("spec")
                     .and_then(|s| s.get("replicas"))
                     .and_then(|r| r.as_i64());
-                tracing::debug!("trigger_restore read deployment {} with replicas={:?}", app, replicas);
+                tracing::debug!("trigger_restore read deployment {} with replicas={:?}", base_app, replicas);
                 replicas
             }
             Err(e) => {
-                tracing::warn!("trigger_restore Deployment read failed for app={} (non-Flux apps can ignore this): {}", app, e);
+                tracing::warn!("trigger_restore Deployment read failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
                 None
             }
         };
 
-        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, app);
+        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, base_app);
         if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": 0 } }))).await {
-            tracing::warn!("trigger_restore Deployment scale-down failed for app={} (non-Flux apps can ignore this): {}", app, e);
+            tracing::warn!("trigger_restore Deployment scale-down failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
         } else {
-            tracing::info!("trigger_restore deployment scaled to 0 for app={}", app);
+            tracing::info!("trigger_restore deployment scaled to 0 for app={}", base_app);
         }
 
         let dst_name = self.dest_crd_name(app);
@@ -785,20 +793,21 @@ impl Kubectl {
     /// Resume the deployment and HelmRelease to their original state after restore completes (success or failure)
     async fn resume_restore(&self, app: &str, ns: &str, original_replicas: Option<i64>) {
         tracing::debug!("resume_restore called for app={} replicas={:?}", app, original_replicas);
+        let base_app = self.app_base_name(app);
 
-        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, app);
+        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, base_app);
         let replicas = original_replicas.unwrap_or(1);
         if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
-            tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", app, replicas, e);
+            tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", base_app, replicas, e);
         } else {
-            tracing::info!("resume_restore scaled deployment {} back to {} replicas", app, replicas);
+            tracing::info!("resume_restore scaled deployment {} back to {} replicas", base_app, replicas);
         }
 
-        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, app);
+        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, base_app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
-            tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", app, e);
+            tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", base_app, e);
         } else {
-            tracing::info!("resume_restore HelmRelease resumed for app={}", app);
+            tracing::info!("resume_restore HelmRelease resumed for app={}", base_app);
         }
     }
 }
