@@ -88,6 +88,8 @@ async fn main() {
         }
     });
 
+    kubectl.check_rbac().await;
+
     // Intentionally allow all CORS origins — this is desired behavior for a self-hosted VolSync WebUI
     // that runs inside a Kubernetes cluster and serves the frontend from the same origin.
     // Restricting to specific origins would complicate deployment when the UI is accessed via

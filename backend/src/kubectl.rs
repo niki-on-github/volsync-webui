@@ -132,6 +132,45 @@ impl Kubectl {
         format!("{}{}", app, self.secret_suffix)
     }
 
+    pub async fn check_rbac(&self) {
+        let checks: Vec<(&str, String)> = vec![
+            (
+                "list ReplicationSources",
+                format!("/apis/{}/v1alpha1/replicationsources", self.api_group),
+            ),
+            (
+                "list Pods",
+                "/api/v1/pods".to_string(),
+            ),
+            (
+                "list Deployments",
+                "/apis/apps/v1/deployments".to_string(),
+            ),
+            (
+                "list HelmReleases",
+                "/apis/source.toolkit.fluxcd.io/v1beta2/helmreleases".to_string(),
+            ),
+        ];
+
+        for (name, path) in &checks {
+            match self.request_text("GET", path, None).await {
+                Ok(_) => tracing::info!("RBAC: {} — OK", name),
+                Err(KubeError::Api(msg)) if msg.contains("403") => {
+                    tracing::error!(
+                        "RBAC: {} — MISSING PERMISSION. Grant access via ClusterRole.",
+                        name
+                    );
+                }
+                Err(KubeError::NotFound(_)) => {
+                    tracing::warn!("RBAC: {} — SKIPPED (CRD not installed)", name);
+                }
+                Err(e) => {
+                    tracing::warn!("RBAC: {} — SKIPPED ({})", name, e);
+                }
+            }
+        }
+    }
+
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, KubeError> {
         let text = self.request_text(method, path, body).await?;
         serde_json::from_str(&text).map_err(|e| KubeError::Api(e.to_string()))
