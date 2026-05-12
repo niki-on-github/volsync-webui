@@ -2,7 +2,7 @@ mod api;
 mod kubectl;
 mod models;
 
-use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore};
+use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore, get_config};
 use std::sync::Arc;
 use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
@@ -102,6 +102,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", axum::routing::get(health))
+        .route("/api/config", axum::routing::get(get_config))
         .route("/api/namespaces", axum::routing::get(list_namespaces))
         .route("/api/apps", axum::routing::get(list_apps))
         .route("/api/apps/:app/:ns/snapshots", axum::routing::get(get_snapshots))

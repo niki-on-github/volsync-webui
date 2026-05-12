@@ -32,10 +32,6 @@ impl From<KubeError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Intentionally return distinct HTTP status codes so the frontend can differentiate
-        // between "resource not found" (404), "conflict/operation failed" (409), and
-        // genuine server errors (500). This is desired behavior — a blanket 500 would hide
-        // actionable errors from the UI (e.g., showing "app not found" vs a generic failure).
         let (status, error_msg) = match self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
@@ -48,12 +44,9 @@ impl IntoResponse for ApiError {
 
 pub async fn list_apps(
     State(kubectl): State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<AppQuery>,
 ) -> Result<Json<Vec<App>>, ApiError> {
-    let ns_filter = query.namespace.as_deref().unwrap_or("all");
-    tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
-
-    let apps = kubectl.list_apps(query.namespace.as_deref()).await.map_err(|e| {
+    tracing::debug!("list_apps called");
+    let apps = kubectl.list_apps().await.map_err(|e| {
         tracing::error!("list_apps failed: {}", e);
         ApiError::from(e)
     })?;
@@ -63,7 +56,6 @@ pub async fn list_apps(
 
 pub async fn list_namespaces(State(kubectl): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
     tracing::debug!("list_namespaces called");
-
     let namespaces = kubectl.list_namespaces().await.map_err(|e| {
         tracing::error!("list_namespaces failed: {}", e);
         ApiError::from(e)
@@ -77,7 +69,6 @@ pub async fn get_snapshots(
     State(kubectl): State<AppState>,
 ) -> Result<Json<Vec<Snapshot>>, ApiError> {
     tracing::debug!("get_snapshots called for app={} namespace={}", app, ns);
-
     let snapshots = kubectl.get_snapshots(&app, &ns).await.map_err(|e| {
         tracing::error!("get_snapshots failed for app={} ns={}: {}", app, ns, e);
         ApiError::from(e)
@@ -91,7 +82,6 @@ pub async fn trigger_backup(
     State(kubectl): State<AppState>,
 ) -> Result<Json<BackupResponse>, ApiError> {
     tracing::info!("trigger_backup called for app={} namespace={}", app, ns);
-
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup using trigger ID: {}", trigger);
     let resp = kubectl.trigger_backup(&app, &ns, &trigger).await.map_err(|e| {
@@ -104,7 +94,6 @@ pub async fn trigger_backup(
 
 pub async fn trigger_backup_all(State(kubectl): State<AppState>) -> Result<Json<BackupAllResponse>, ApiError> {
     tracing::info!("trigger_backup_all called");
-
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup_all using trigger ID: {}", trigger);
     let apps = kubectl.trigger_backup_all(&trigger).await.map_err(|e| {
@@ -140,6 +129,14 @@ pub async fn trigger_restore(
             ApiError::from(e)
         })?;
     Ok(Json(resp))
+}
+
+pub async fn get_config() -> Json<AppConfig> {
+    let interval = std::env::var("REFRESH_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3600);
+    Json(AppConfig { refresh_interval_secs: interval })
 }
 
 pub async fn health() -> StatusCode {

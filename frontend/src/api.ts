@@ -1,4 +1,4 @@
-import type { App, BackupAllResponse, BackupResponse, RestoreResponse, Snapshot } from "./types";
+import type { App, AppConfig, BackupAllResponse, BackupResponse, RestoreResponse, Snapshot } from "./types";
 
 const BASE = typeof window !== "undefined" ? window.location.origin : "http://localhost:8080";
 
@@ -20,19 +20,13 @@ function logError(context: string, e: unknown) {
 }
 
 export const api = {
-  async listNamespaces(): Promise<string[]> {
-    try {
-      return await fetchJson<string[]>("/api/namespaces");
-    } catch (e) {
-      logError("listNamespaces", e);
-      throw e;
-    }
+  async getConfig(): Promise<AppConfig> {
+    return fetchJson<AppConfig>("/api/config");
   },
 
-  async listApps(namespace?: string): Promise<App[]> {
+  async listApps(): Promise<App[]> {
     try {
-      const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
-      return await fetchJson<App[]>(`/api/apps${qs}`);
+      return await fetchJson<App[]>("/api/apps");
     } catch (e) {
       logError("listApps", e);
       throw e;

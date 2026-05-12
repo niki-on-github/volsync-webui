@@ -63,7 +63,9 @@ impl std::error::Error for KubeError {}
 pub struct Kubectl {
     client: Client,
     base_url: String,
-    secret_suffix: String,
+    source_secret_suffix: String,
+    #[allow(dead_code)]
+    dest_secret_suffix: String,
     api_group: String,
     token: Option<String>,
 }
@@ -74,7 +76,9 @@ impl Kubectl {
             .map(|h| format!("https://{}:443", h))
             .unwrap_or_else(|_| "http://localhost:8080".to_string());
 
-        let secret_suffix = std::env::var("VOLSYNC_SECRET_SUFFIX")
+        let source_secret_suffix = std::env::var("VOLSYNC_SOURCE_SECRET_SUFFIX")
+            .unwrap_or_else(|_| "-volsync-secret".to_string());
+        let dest_secret_suffix = std::env::var("VOLSYNC_DEST_SECRET_SUFFIX")
             .unwrap_or_else(|_| "-volsync-secret".to_string());
 
         let api_group = std::env::var("VOLSYNC_API_GROUP")
@@ -125,11 +129,16 @@ impl Kubectl {
             client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
         };
 
-        Ok(Self { client, base_url, secret_suffix, api_group, token })
+        Ok(Self { client, base_url, source_secret_suffix, dest_secret_suffix, api_group, token })
     }
 
-    fn secret_name(&self, app: &str) -> String {
-        format!("{}{}", app, self.secret_suffix)
+    fn source_secret_name(&self, app: &str) -> String {
+        format!("{}{}", app, self.source_secret_suffix)
+    }
+
+    #[allow(dead_code)]
+    fn dest_secret_name(&self, app: &str) -> String {
+        format!("{}{}", app, self.dest_secret_suffix)
     }
 
     pub async fn check_rbac(&self) {
@@ -249,14 +258,8 @@ impl Kubectl {
         req.send().await.map_err(|e| KubeError::Api(e.to_string()))
     }
 
-    pub async fn list_apps(&self, namespace: Option<&str>) -> Result<Vec<App>, KubeError> {
-        let ns_filter = namespace.unwrap_or("all");
-        tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
-
-        let api_path = match namespace {
-            Some(ns) => format!("/apis/{}/v1alpha1/namespaces/{}/replicationsources", self.api_group, ns),
-            None => format!("/apis/{}/v1alpha1/replicationsources", self.api_group),
-        };
+    pub async fn list_apps(&self) -> Result<Vec<App>, KubeError> {
+        let api_path = format!("/apis/{}/v1alpha1/replicationsources", self.api_group);
         let resp: Value = self.request("GET", &api_path, None).await?;
 
         let items = resp.get("items")
@@ -268,7 +271,51 @@ impl Kubectl {
         let apps: Vec<App> = items.iter().filter_map(|item| {
             let name = item.get("metadata")?.get("name")?.as_str()?.to_string();
             let namespace_item = item.get("metadata")?.get("namespace")?.as_str()?.to_string();
-            Some(App { name, namespace: namespace_item })
+            let status = item.get("status");
+            let spec = item.get("spec");
+
+            let last_sync_time = status
+                .and_then(|s| s.get("lastSyncTime"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let last_sync_duration = status
+                .and_then(|s| s.get("lastSyncDuration"))
+                .and_then(|v| v.as_f64())
+                .map(|d| format!("{:.1}s", d));
+            let last_result = status
+                .and_then(|s| s.get("latestMoverStatus"))
+                .and_then(|m| m.get("result"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let next_sync_time = status
+                .and_then(|s| s.get("nextSyncTime"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let in_progress = status
+                .and_then(|s| s.get("conditions"))
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter().any(|c| {
+                        c.get("type").and_then(|v| v.as_str()) == Some("Synchronizing")
+                            && c.get("status").and_then(|v| v.as_str()) == Some("True")
+                    })
+                })
+                .unwrap_or(false);
+            let paused = spec
+                .and_then(|s| s.get("paused"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            Some(App {
+                name,
+                namespace: namespace_item,
+                last_sync_time,
+                last_sync_duration,
+                last_result,
+                next_sync_time,
+                in_progress,
+                paused,
+            })
         }).collect();
 
         tracing::debug!("list_apps returning {} apps", apps.len());
@@ -370,7 +417,7 @@ impl Kubectl {
     }
 
     pub async fn trigger_backup_all(&self, trigger: &str) -> Result<Vec<AppBackupStatus>, KubeError> {
-        let apps = self.list_apps(None).await?;
+        let apps = self.list_apps().await?;
         let kubectl = self.clone();
 
         // Concurrency limit to prevent overwhelming the K8s API server (Bug #7 fix)
@@ -457,7 +504,7 @@ impl Kubectl {
                     "name": "restic",
                     "image": "restic/restic:latest",
                     "args": ["snapshots", "--json"],
-                    "envFrom": [{ "secretRef": { "name": self.secret_name(app) }}]
+                    "envFrom": [{ "secretRef": { "name": self.source_secret_name(app) }}]
                 }]
             }
         });

@@ -7,36 +7,41 @@ A web-based management interface for VolSync replication and backup operations o
 
 ## Features
 
-- **Application Management**: List and select applications backed by VolSync ReplicationSources
-- **Snapshot Viewer**: View Restic snapshots for each application
-- **Backup Operations**: Trigger manual backups for individual apps or all apps
-- **Restore Operations**: Restore from any available snapshot timestamp
-- **Namespace Filtering**: View and filter resources across Kubernetes namespaces
+- **Dashboard Table**: View all ReplicationSources in a sortable table with status, last backup time, duration, and result
+- **Detail Panel**: Click a row to see snapshot history, backup status, and restore controls
+- **Backup Operations**: Trigger manual backups for individual apps
+- **Restore Operations**: Restore from any available snapshot timestamp via the detail panel
+- **Auto-Refresh**: Periodically updates the app list with configurable interval (default: 1 hour, no-overlap guard)
+- **Manual Refresh**: Refresh button in header to fetch latest data on demand
 
 ## Architecture
 
 ```
 volsync-webui/
-├── backend/              # Axum-based REST API server
+├── backend/                    # Axum-based REST API server
 │   └── src/
-│       ├── main.rs       # Server entry point, router setup
-│       ├── api.rs        # HTTP handlers for all endpoints
-│       ├── kubectl.rs    # Kubernetes API client (raw HTTP via reqwest)
-│       └── models.rs     # Request/response data structures
-├── frontend/             # Yew-based WASM web UI
-│   ├── src/
-│   │   ├── main.rs       # WASM entry point
-│   │   ├── lib.rs        # Library exports
-│   │   ├── api.rs        # Frontend API client (fetch)
-│   │   └── components/   # Yew UI components
-│   │       ├── app.rs           # Main application shell
-│   │       ├── app_selector.rs  # Application dropdown
-│   │       ├── backup_panel.rs  # Backup controls
-│   │       ├── restore_panel.rs # Restore controls
-│   │       ├── snapshot_list.rs # Snapshot table
-│   │       └── namespace.rs     # Namespace selector
-│   └── index.html        # HTML shell
-└── Dockerfile           # Multi-stage container build
+│       ├── main.rs             # Server entry point, router setup
+│       ├── api.rs              # HTTP handlers for all endpoints
+│       ├── kubectl.rs          # Kubernetes API client (raw HTTP via reqwest)
+│       └── models.rs           # Request/response data structures
+├── frontend/                   # React + Vite web UI
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tailwind.config.ts
+│   └── src/
+│       ├── main.tsx            # Entry point
+│       ├── App.tsx             # Main layout with master-detail view
+│       ├── api.ts              # Frontend API client (fetch)
+│       ├── types.ts            # TypeScript interfaces
+│       ├── index.css           # Tailwind + CSS variables
+│       ├── lib/utils.ts        # cn() helper
+│       └── components/
+│           ├── apps-table.tsx  # Dashboard table with all apps
+│           ├── app-detail.tsx  # Detail panel with snapshots/backup/restore
+│           ├── snapshot-list.tsx
+│           └── ui/             # shadcn primitives (Button, Card, Select, Table, Badge)
+└── Dockerfile                  # Multi-stage container build
 ```
 
 ## Tech Stack
@@ -44,21 +49,37 @@ volsync-webui/
 | Layer | Technology |
 |-------|------------|
 | Backend | Axum 0.7, Tokio, reqwest |
-| Frontend | Yew 0.21 (WASM), TailwindCSS |
+| Frontend | React 18, TypeScript, Vite 6, TailwindCSS 3, shadcn/ui |
 | Kubernetes | Raw HTTP API via reqwest (in-cluster) |
-| Container | Debian bullseye-slim |
+| Container | Debian bookworm-slim |
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
+| GET | `/api/config` | Frontend configuration (`{ refresh_interval_secs }`) |
 | GET | `/api/namespaces` | List all namespaces |
-| GET | `/api/apps` | List all ReplicationSources |
+| GET | `/api/apps` | List all ReplicationSources with full status |
 | GET | `/api/apps/:app/:ns/snapshots` | Get snapshots for an app |
 | POST | `/api/apps/:app/:ns/backup` | Trigger backup for app |
 | POST | `/api/apps/:app/:ns/restore` | Trigger restore for app |
 | POST | `/api/apps/backup-all` | Trigger backup for all apps |
+
+### App Response Fields
+
+The `/api/apps` endpoint returns extended status information for each ReplicationSource:
+
+| Field | Type | Source |
+|-------|------|--------|
+| `name` | string | `metadata.name` |
+| `namespace` | string | `metadata.namespace` |
+| `last_sync_time` | string\|null | `status.lastSyncTime` |
+| `last_sync_duration` | string\|null | `status.lastSyncDuration` (formatted as `{n.n}s`) |
+| `last_result` | string\|null | `status.latestMoverStatus.result` |
+| `next_sync_time` | string\|null | `status.nextSyncTime` |
+| `in_progress` | bool | `status.conditions[].type == "Synchronizing" && status == "True"` |
+| `paused` | bool | `spec.paused` |
 
 ## Development
 
@@ -66,45 +87,41 @@ volsync-webui/
 
 - Rust 1.75+
 - Node.js 18+
-- Nix (for development shell)
+- Nix (for development shell, optional)
 
 ### Nix Dev Shell
 
 ```bash
 cd volsync-webui
-nix develop --accept-flake-config -c cargo check
+nix develop --accept-flake-config
 ```
 
 ### Build Commands
 
 ```bash
-# Check both crates
-nix develop --accept-flake-config -c cargo check
+# Backend
+cargo check -p volsync-webui-backend
+cargo build -p volsync-webui-backend
 
-# Check individual crates
-nix develop --accept-flake-config -c cargo check -p volsync-webui-backend
-nix develop --accept-flake-config -c cargo check -p volsync-webui-frontend
-
-# Build backend
-nix develop --accept-flake-config -c cargo build -p volsync-webui-backend
+# Frontend
+cd frontend && npm install && npx tsc -b && npx vite build
 
 # Format code
-nix develop --accept-flake-config -c cargo fmt
+cargo fmt
 ```
 
-### Local Development (without Nix)
+### Frontend Dev Server
 
 ```bash
-# Install Rust dependencies
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup install 1.75
+cd frontend
+npm install
+npm run dev
+```
 
-# Build frontend WASM
-cargo install trunk wasm-bindgen-cli
-cd frontend && trunk build
+The Vite dev server runs on `http://localhost:5173` and proxies API calls to the backend running on port 8080. Make sure the backend is running separately:
 
-# Run backend
-cd backend && cargo run
+```bash
+cargo run -p volsync-webui-backend
 ```
 
 ## Deployment
@@ -112,69 +129,88 @@ cd backend && cargo run
 ### Docker
 
 ```bash
-docker build -t volsync-webui:latest volsync-webui/
+docker build -t volsync-webui:latest .
 docker run -p 8080:8080 volsync-webui:latest
 ```
 
 The container expects to run inside a Kubernetes cluster with access to the Kubernetes API.
 
+### Kubernetes
+
+Apply the RBAC configuration first, then deploy the container:
+
+```bash
+kubectl apply -f kube-manifests/rbac.yaml
+kubectl apply -f your-deployment.yaml
+```
+
 ## RBAC Permissions
 
-The ServiceAccount requires cluster-wide permissions:
+The ServiceAccount requires these permissions. Create a `ClusterRole` + `ClusterRoleBinding`:
 
-| Resource | Verbs |
-|----------|-------|
-| pods | get, list, delete, create, watch |
-| secrets | get, list, create, delete |
-| replicationsources | get, list, patch, update |
-| replicationdestinations | get, list, create, patch, update |
-| helmreleases | get, list, patch |
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: volsync-webui
+rules:
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationsources", "replicationdestinations"]
+    verbs: ["get", "list", "patch", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list", "patch"]
+```
+
+The app runs a startup RBAC check that probes each API endpoint and logs whether permissions are present. Missing permissions are non-fatal (logged as errors but the app continues).
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | `info` | Logging level (trace, debug, info, warn, error) |
+| `RUST_LOG` | `debug` | Logging level (trace, debug, info, warn, error) |
 | `KUBERNETES_SERVICE_HOST` | auto-detected | Kubernetes API server host |
-| `KUBERNETES_SERVICE_PORT` | `443` | Kubernetes API server port |
-| `VOLSYNC_SECRET_SUFFIX` | `-volsync-secret` | Suffix appended to app name to form secret name (e.g., `{app}-volsync-secret`) |
+| `VOLSYNC_API_GROUP` | `volsync.backube` | API group for VolSync CRDs (set to `replication.storage.io` for older clusters) |
+| `VOLSYNC_SOURCE_SECRET_SUFFIX` | `-volsync-secret` | Suffix for ReplicationSource secrets (e.g., `{app}-volsync-secret`) |
+| `VOLSYNC_DEST_SECRET_SUFFIX` | `-volsync-secret` | Suffix for ReplicationDestination secrets |
+| `REFRESH_INTERVAL_SECS` | `3600` | Frontend auto-refresh interval in seconds (1 hour default) |
+| `BACKUP_ALL_CONCURRENCY` | `5` | Max concurrent backups for backup-all |
+| `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
+| `POLL_INTERVAL_SECS` | `2` | Backup/restore poll interval in seconds |
+| `POD_STARTUP_TIMEOUT_SECS` | `60` | Snapshot pod startup timeout in seconds |
 
-## Building Frontend (Yew/WASM)
+### API Group Configuration
 
-The frontend is compiled to WebAssembly and served by the backend.
+The default `VOLSYNC_API_GROUP=volsync.backube` matches modern VolSync installations. For older clusters still using the legacy API group, set:
 
-```bash
-# Using trunk (recommended)
-cd frontend
-trunk build
-
-# Output goes to frontend/dist/
-```
-
-### TailwindCSS
-
-TailwindCSS is used for styling. The config is in `frontend/tailwind.config.js`.
-
-To rebuild styles during development:
-```bash
-cd frontend
-npx tailwindcss -i ./src/style.css -o ./dist/style.css --watch
+```yaml
+env:
+  - name: VOLSYNC_API_GROUP
+    value: "replication.storage.io"
 ```
 
 ## Kubernetes Compatibility
 
 - Tested with Kubernetes 1.25+
-- Uses `networking.k8s.io/v1` for Ingress (if added later)
-- Uses `replication.storage.io/v1alpha1` for VolSync CRDs
-- Uses `source.toolkit.fluxcd.io/v1beta2` for HelmRelease
+- Uses `volsync.backube/v1alpha1` for VolSync CRDs (configurable via `VOLSYNC_API_GROUP`)
+- Uses `source.toolkit.fluxcd.io/v1beta2` for HelmRelease (optional, for Flux-based apps)
 
 ## Security Considerations
 
 1. **ServiceAccount**: Runs with a dedicated SA, not default
-2. **ClusterRole**: Requires broad read access - restrict in production
+2. **ClusterRole**: Requires broad read access — restrict in production
 3. **No TLS**: Backend runs HTTP; TLS should be handled by ingress/controller
-4. **No Authentication**: Currently no auth - expose via auth proxy (e.g., OAuth2 proxy) in production
-5. **Secret Access**: Reads secrets named `{app}{VOLSYNC_SECRET_SUFFIX}` (default: `{app}-volsync-secret`) in app namespaces. Configurable via `VOLSYNC_SECRET_SUFFIX` env var.
+4. **No Authentication**: Currently no auth — expose via auth proxy (e.g., OAuth2 proxy) in production
+5. **Secret Access**: Reads secrets named `{app}{VOLSYNC_SOURCE_SECRET_SUFFIX}` (default: `{app}-volsync-secret`) in app namespaces
 
 ## License
 

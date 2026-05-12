@@ -1,126 +1,92 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { api } from "@/api";
-import type { App, Snapshot } from "@/types";
-import { NamespaceSelector } from "@/components/namespace-selector";
-import { AppSelector } from "@/components/app-selector";
-import { SnapshotList } from "@/components/snapshot-list";
-import { BackupPanel } from "@/components/backup-panel";
-import { RestorePanel } from "@/components/restore-panel";
+import type { App, AppConfig } from "@/types";
+import { AppsTable } from "@/components/apps-table";
+import { AppDetail } from "@/components/app-detail";
+import { RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export default function App() {
-  const [namespaces, setNamespaces] = useState<string[]>([]);
   const [apps, setApps] = useState<App[]>([]);
-  const [selectedNamespace, setSelectedNamespace] = useState("");
   const [selectedApp, setSelectedApp] = useState<App | null>(null);
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
-  const [loadingSnapshots, setLoadingSnapshots] = useState(false);
+  const [config, setConfig] = useState<AppConfig>({ refresh_interval_secs: 3600 });
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refreshingRef = useRef(false);
 
+  const loadApps = async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      const a = await api.listApps();
+      setApps(a);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  };
+
+  // Initial fetch: config + apps
   useEffect(() => {
-    api
-      .listNamespaces()
-      .then(setNamespaces)
-      .catch((e: Error) => console.error("Failed to load namespaces:", e.message));
+    api.getConfig()
+      .then(setConfig)
+      .catch(() => {});
+    loadApps();
   }, []);
 
+  // Periodic refresh
   useEffect(() => {
-    setSelectedApp(null);
-    setSnapshots([]);
-    api
-      .listApps(selectedNamespace || undefined)
-      .then(setApps)
-      .catch((e: Error) => console.error("Failed to load apps:", e.message));
-  }, [selectedNamespace]);
-
-  useEffect(() => {
-    if (!selectedApp) return;
-    let cancelled = false;
-    setLoadingSnapshots(true);
-    api
-      .getSnapshots(selectedApp.name, selectedApp.namespace)
-      .then((s) => {
-        if (!cancelled) setSnapshots(s);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) {
-          setSnapshots([]);
-          console.warn("Failed to load snapshots:", e.message);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingSnapshots(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedApp]);
-
-  const handleRefresh = () => {
-    if (!selectedApp) return;
-    let cancelled = false;
-    setLoadingSnapshots(true);
-    api
-      .getSnapshots(selectedApp.name, selectedApp.namespace)
-      .then((s) => {
-        if (!cancelled) setSnapshots(s);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) {
-          setSnapshots([]);
-          console.warn("Failed to refresh snapshots:", e.message);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingSnapshots(false);
-      });
-  };
+    const interval = setInterval(loadApps, config.refresh_interval_secs * 1000);
+    return () => clearInterval(interval);
+  }, [config.refresh_interval_secs]);
 
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b px-6 py-4">
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-bold text-primary">VolSync WebUI</h1>
-          <div className="flex items-center gap-4">
-            <NamespaceSelector
-              selected={selectedNamespace}
-              namespaces={namespaces}
-              onSelect={(val) => setSelectedNamespace(val === "__all__" ? "" : val)}
-            />
-            <AppSelector
-              selected={selectedApp}
-              apps={apps}
-              onSelect={setSelectedApp}
-            />
-          </div>
+          <Button variant="outline" size="sm" onClick={loadApps} disabled={refreshing}>
+            <RefreshCw className={`mr-1 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "Refreshing..." : "Refresh"}
+          </Button>
         </div>
       </header>
 
+      {error && (
+        <div className="px-6 pt-4">
+          <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive">
+            {error}
+          </div>
+        </div>
+      )}
+
       <main className="p-6">
-        {selectedApp ? (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <SnapshotList
-              snapshots={snapshots}
-              loading={loadingSnapshots}
-              onRefresh={handleRefresh}
-            />
-            <BackupPanel
-              appName={selectedApp.name}
-              ns={selectedApp.namespace}
-            />
-            <RestorePanel
-              appName={selectedApp.name}
-              ns={selectedApp.namespace}
-              snapshots={snapshots}
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div className="xl:col-span-2">
+            <AppsTable
+              apps={apps}
+              selectedApp={selectedApp}
+              onSelect={setSelectedApp}
+              refreshing={refreshing}
+              onRefresh={loadApps}
             />
           </div>
-        ) : (
-          <div className="flex items-center justify-center h-64">
-            <p className="text-muted-foreground text-lg">
-              {apps.length === 0
-                ? "No applications found"
-                : "Select an application to manage backups"}
-            </p>
+          <div>
+            {selectedApp ? (
+              <AppDetail app={selectedApp} onBackupComplete={loadApps} />
+            ) : (
+              <div className="rounded-lg border bg-card text-card-foreground p-6">
+                <p className="text-sm text-muted-foreground">
+                  Select an application from the table to view details
+                </p>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </main>
     </div>
   );

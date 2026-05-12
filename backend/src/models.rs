@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppQuery {
-    pub namespace: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct App {
     pub name: String,
     pub namespace: String,
+    pub last_sync_time: Option<String>,
+    pub last_sync_duration: Option<String>,
+    pub last_result: Option<String>,
+    pub next_sync_time: Option<String>,
+    pub in_progress: bool,
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,4 +59,9 @@ pub struct AppBackupStatus {
     pub namespace: String,
     pub success: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppConfig {
+    pub refresh_interval_secs: u64,
 }
