@@ -38,12 +38,12 @@ pub fn SnapshotList(props: &Props) -> Html {
                         <tbody class="divide-y divide-gray-700">
                             {props.snapshots.iter().map(|snap| {
                                 html! {
-                                    <tr class="text-gray-200 hover:bg-gray-700">
+                                    <tr key={snap.id.clone()} class="text-gray-200 hover:bg-gray-700">
                                         <td class="px-4 py-2 font-mono text-xs">{&snap.id}</td>
                                         <td class="px-4 py-2">{&snap.time}</td>
                                         <td class="px-4 py-2">
                                             {snap.tags.iter().map(|t| {
-                                                html! { <span class="inline-block bg-gray-600 px-2 py-0.5 rounded text-xs mr-1">{t}</span> }
+                                                html! { <span key={t.clone()} class="inline-block bg-gray-600 px-2 py-0.5 rounded text-xs mr-1">{t}</span> }
                                             }).collect::<Html>()}
                                         </td>
                                     </tr>

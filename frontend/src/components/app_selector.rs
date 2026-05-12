@@ -34,7 +34,7 @@ pub fn AppSelector(props: &Props) -> Html {
                 {props.apps.iter().map(|app| {
                     let val = format!("{}/{}", app.name, app.namespace);
                     let label = format!("{} ({})", app.name, app.namespace);
-                    html! { <option value={val}>{label}</option> }
+                    html! { <option key={val.clone()} value={val}>{label}</option> }
                 }).collect::<Html>()}
             </select>
         </div>

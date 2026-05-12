@@ -93,13 +93,17 @@ impl Kubectl {
             None
         };
 
+        let client_builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10));
+
         let ca_cert_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt");
         let client = if ca_cert_path.exists() {
             match tokio::fs::read(ca_cert_path).await {
                 Ok(ca_cert) => {
                     let cert = reqwest::Certificate::from_pem(&ca_cert)
                         .map_err(|e| KubeError::Api(format!("Failed to parse CA certificate: {}", e)))?;
-                    let client = reqwest::Client::builder()
+                    let client = client_builder
                         .add_root_certificate(cert)
                         .build()
                         .map_err(|e| KubeError::Api(format!("Failed to build client with CA: {}", e)))?;
@@ -108,12 +112,12 @@ impl Kubectl {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to read CA certificate: {}, using default client", e);
-                    reqwest::Client::new()
+                    client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
                 }
             }
         } else {
             tracing::info!("No CA certificate found at {}, using default client", ca_cert_path.display());
-            reqwest::Client::new()
+            client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
         };
 
         Ok(Self { client, base_url, secret_suffix, token })
@@ -124,41 +128,63 @@ impl Kubectl {
     }
 
     async fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, KubeError> {
+        let text = self.request_text(method, path, body).await?;
+        serde_json::from_str(&text).map_err(|e| KubeError::Api(e.to_string()))
+    }
+
+    async fn request_text(&self, method: &str, path: &str, body: Option<Value>) -> Result<String, KubeError> {
         let url = format!("{}{}", self.base_url, path);
 
-        // Retry logic for transient failures (Bug #10 fix) - 1 retry with 1s delay
-        let resp = match self.do_request(&url, method, body.clone()).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Request attempt 1 failed for {}: {}, retrying...", path, e);
-                sleep(Duration::from_secs(1)).await;
-                self.do_request(&url, method, body)
-                    .await
-                    .map_err(|e| KubeError::Api(format!("Retry failed for {}: {}", path, e)))?
+        let max_retries = 3;
+        let mut last_err = None;
+        for attempt in 0..max_retries {
+            match self.do_request(&url, method, body.clone()).await {
+                Ok(resp) => {
+                    let status = resp.status();
+
+                    if status == reqwest::StatusCode::NOT_FOUND {
+                        return Err(KubeError::NotFound(format!("Resource not found at {}", path)));
+                    }
+                    if status.is_client_error() {
+                        let text = resp.text().await.unwrap_or_default();
+                        return Err(KubeError::Api(format!(
+                            "Client error {} on {}: {}",
+                            status, path, text
+                        )));
+                    }
+                    if status.is_server_error() {
+                        let text = resp.text().await.unwrap_or_default();
+                        if attempt < max_retries - 1 {
+                            let delay = Duration::from_secs(1 << attempt);
+                            tracing::warn!("Server error {} on {}, retrying in {}s: {}", status, path, delay.as_secs(), text);
+                            sleep(delay).await;
+                            last_err = Some(KubeError::Api(format!("Server error {} on {}: {}", status, path, text)));
+                            continue;
+                        }
+                        return Err(KubeError::Api(format!(
+                            "Server error {} on {}: {}",
+                            status, path, text
+                        )));
+                    }
+
+                    return resp.text().await.map_err(|e| KubeError::Api(e.to_string()));
+                }
+                Err(e) => {
+                    if attempt < max_retries - 1 {
+                        let delay = Duration::from_secs(1 << attempt);
+                        tracing::warn!("Request attempt {} failed for {}, retrying in {}s: {}", attempt + 1, path, delay.as_secs(), e);
+                        sleep(delay).await;
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(KubeError::Api(format!(
+                        "Request failed after {} retries for {}: {}",
+                        max_retries, path, e
+                    )));
+                }
             }
-        };
-
-        // Check all error status codes, not just 404 (Bug #5 fix)
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(KubeError::NotFound(format!("Resource not found at {}", path)));
         }
-        if status.is_client_error() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(KubeError::Api(format!(
-                "Client error {} on {}: {}",
-                status, path, body
-            )));
-        }
-        if status.is_server_error() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(KubeError::Api(format!(
-                "Server error {} on {}: {}",
-                status, path, body
-            )));
-        }
-
-        resp.json::<Value>().await.map_err(|e| KubeError::Api(e.to_string()))
+        Err(last_err.unwrap())
     }
 
     async fn do_request(&self, url: &str, method: &str, body: Option<Value>) -> Result<reqwest::Response, KubeError> {
@@ -183,7 +209,11 @@ impl Kubectl {
         let ns_filter = namespace.unwrap_or("all");
         tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
 
-        let resp: Value = self.request("GET", "/apis/replication.storage.io/v1alpha1/replicationsources", None).await?;
+        let api_path = match namespace {
+            Some(ns) => format!("/apis/replication.storage.io/v1alpha1/namespaces/{}/replicationsources", ns),
+            None => "/apis/replication.storage.io/v1alpha1/replicationsources".to_string(),
+        };
+        let resp: Value = self.request("GET", &api_path, None).await?;
 
         let items = resp.get("items")
             .and_then(|v| v.as_array())
@@ -194,16 +224,10 @@ impl Kubectl {
         let apps: Vec<App> = items.iter().filter_map(|item| {
             let name = item.get("metadata")?.get("name")?.as_str()?.to_string();
             let namespace_item = item.get("metadata")?.get("namespace")?.as_str()?.to_string();
-            // Filter by namespace if specified
-            if let Some(ns) = namespace {
-                if namespace_item != ns {
-                    return None;
-                }
-            }
             Some(App { name, namespace: namespace_item })
         }).collect();
 
-        tracing::debug!("list_apps returning {} apps (filtered from {})", apps.len(), items.len());
+        tracing::debug!("list_apps returning {} apps", apps.len());
         Ok(apps)
     }
 
@@ -278,61 +302,25 @@ impl Kubectl {
                 }
             }
 
-            // Check for error/failed conditions explicitly (Bug #13 fix)
-            let conditions = rs.get("status")
+            // Check for explicit error conditions in the status
+            if let Some(conditions) = rs.get("status")
                 .and_then(|s| s.get("conditions"))
-                .and_then(|c| c.as_array());
-
-            if let Some(arr) = conditions {
-                // Check for Error or Failed type conditions first
-                for c in arr.iter() {
+                .and_then(|c| c.as_array()) {
+                for c in conditions {
                     let cond_type = c.get("type").and_then(|v| v.as_str());
                     let cond_status = c.get("status").and_then(|v| v.as_str());
                     let cond_reason = c.get("reason").and_then(|v| v.as_str());
-                    let cond_message = c.get("message").and_then(|v| v.as_str());
 
-                    // If any condition has a Failure/Error status, return error
-                    if cond_status == Some("False") && (cond_type == Some("Ready") || cond_type == Some("Synchronizing")) {
-                        tracing::warn!("trigger_backup detected failure on poll #{} for app={}: {:?} - {:?}", poll_count, app, cond_reason, cond_message);
-                        let result = rs.get("status")
-                            .and_then(|s| s.get("latestMoverStatus"))
-                            .and_then(|m| m.get("result"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        return Err(KubeError::SnapshotFailed(format!(
-                            "Backup failed: {:?} - {:?} - {:?}",
-                            cond_reason, cond_message, result
-                        )));
+                    if cond_status == Some("False") && cond_type == Some("Ready") {
+                        if let Some(reason) = cond_reason {
+                            let is_error = reason.contains("Error") || reason.contains("Failed") || reason == "BackupFailed";
+                            if is_error {
+                                tracing::warn!("trigger_backup detected failure on poll #{} for app={}: {}", poll_count, app, reason);
+                                return Err(KubeError::SnapshotFailed(format!("Backup failed: {}", reason)));
+                            }
+                        }
                     }
                 }
-
-                // Map raw Synchronizing condition reason to user-friendly status
-                let status = arr.iter()
-                    .find(|c| c.get("type") == Some(&serde_json::json!("Synchronizing")))
-                    .and_then(|c| c.get("reason"))
-                    .and_then(|v| v.as_str());
-
-                match status {
-                    Some("SyncInProgress") => tracing::debug!("trigger_backup poll #{}: SyncInProgress for app={}", poll_count, app),
-                    Some("Pending") => tracing::debug!("trigger_backup poll #{}: Pending for app={}", poll_count, app),
-                    Some(reason) => {
-                        tracing::info!("trigger_backup completed on poll #{} with reason={} for app={}", poll_count, reason, app);
-                        let result = rs.get("status")
-                            .and_then(|s| s.get("latestMoverStatus"))
-                            .and_then(|m| m.get("result"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        // Return the human-readable reason as status instead of raw K8s condition reason
-                        return Ok(BackupResponse {
-                            trigger: trigger.to_string(),
-                            status: reason.to_string(),
-                            result,
-                        });
-                    }
-                    None => tracing::debug!("trigger_backup poll #{}: no Synchronizing condition for app={}", poll_count, app),
-                }
-            } else {
-                tracing::debug!("trigger_backup poll #{}: no conditions array for app={}", poll_count, app);
             }
         }
     }
@@ -358,13 +346,24 @@ impl Kubectl {
             let sem = semaphore.clone();
             tokio::spawn(async move {
                 // Acquire semaphore permit before starting backup
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                let _permit = match sem.acquire().await {
+                    Ok(p) => p,
+                    Err(e) => return AppBackupStatus {
+                        app: app_name.clone(),
+                        namespace: app_ns.clone(),
+                        success: false,
+                        error: Some(format!("Semaphore error: {}", e)),
+                    },
+                };
                 match kubectl_clone.trigger_backup(&app_name, &app_ns, &trigger_owned).await {
-                    Ok(r) => AppBackupStatus {
-                        app: app_name,
-                        namespace: app_ns,
-                        success: r.result.as_deref() == Some("Successful"),
-                        error: if r.result.as_deref() == Some("Successful") { None } else { r.result },
+                    Ok(r) => {
+                        let success = is_successful(&r.result);
+                        AppBackupStatus {
+                            app: app_name,
+                            namespace: app_ns,
+                            success,
+                            error: if success { None } else { r.result },
+                        }
                     },
                     Err(e) => AppBackupStatus {
                         app: app_name,
@@ -395,12 +394,11 @@ impl Kubectl {
     pub async fn get_snapshots(&self, app: &str, ns: &str) -> Result<Vec<Snapshot>, KubeError> {
         tracing::info!("get_snapshots called for app={} namespace={}", app, ns);
 
-        // Use timestamp-based suffix to prevent race conditions between concurrent requests (Bug #12 fix)
-        let random_suffix = std::time::SystemTime::now()
+        let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| format!("{:08x}", d.subsec_nanos()))
-            .unwrap_or_else(|_| "00000000".to_string());
-        let pod_name = format!("volsync-snapshots-{}-{}", app, random_suffix);
+            .map(|d| format!("{:x}", d.as_nanos()))
+            .unwrap_or_else(|_| "0".to_string());
+        let pod_name = format!("volsync-snapshots-{}-{}", app, unique_id);
         let pod_url = format!("/api/v1/namespaces/{}/pods/{}", ns, pod_name);
 
         tracing::debug!("get_snapshots creating pod {} in namespace {}", pod_name, ns);
@@ -464,10 +462,8 @@ impl Kubectl {
         }
 
         let log_url = format!("/api/v1/namespaces/{}/pods/{}/log", ns, pod_name);
-        // Pod logs are raw text output from restic CLI, NOT JSON lines.
-        // Restic outputs one JSON object per line when --json flag is used.
         tracing::debug!("get_snapshots fetching logs for pod {}", pod_name);
-        let logs: String = self.request("GET", &log_url, None).await?.to_string();
+        let logs = self.request_text("GET", &log_url, None).await?;
         tracing::debug!("get_snapshots fetched {} bytes of logs for pod {}", logs.len(), pod_name);
 
         // Clean up pod after reading logs — handle error gracefully but log it
@@ -537,7 +533,11 @@ impl Kubectl {
         });
 
         tracing::debug!("trigger_restore PATCHing ReplicationDestination with trigger={}", trigger);
-        self.request("PATCH", &dst_url, Some(dst_patch)).await?;
+        if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
+            tracing::error!("trigger_restore failed to patch ReplicationDestination, rolling back: {}", e);
+            self.resume_restore(app, ns, original_replicas).await;
+            return Err(KubeError::Api(format!("Failed to patch ReplicationDestination: {}", e)));
+        }
         tracing::info!("trigger_restore ReplicationDestination updated, starting poll loop");
 
         let restore_timeout = restore_timeout_secs();
@@ -569,8 +569,7 @@ impl Kubectl {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
-                    // Only report completed if mover status is Successful or None (no mover ran)
-                    let finished = result.as_deref() == Some("Successful") || result.is_none();
+                    let finished = result.as_deref().map_or(true, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
                         tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
                         // Resume deployment and HelmRelease
@@ -616,6 +615,10 @@ impl Kubectl {
             tracing::info!("resume_restore HelmRelease resumed for app={}", app);
         }
     }
+}
+
+fn is_successful(result: &Option<String>) -> bool {
+    result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"))
 }
 
 fn parse_snapshots(logs: &str) -> Result<Vec<Snapshot>, KubeError> {

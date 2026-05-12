@@ -4,7 +4,6 @@ mod models;
 
 use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -78,7 +77,7 @@ async fn main() {
 
     tracing::info!("Starting VolSync WebUI (RUST_LOG={})", rust_log);
 
-    let kubectl = Arc::new(RwLock::new(match kubectl::Kubectl::new().await {
+    let kubectl = Arc::new(match kubectl::Kubectl::new().await {
         Ok(k) => {
             tracing::info!("Kubernetes client initialized successfully");
             k
@@ -87,7 +86,7 @@ async fn main() {
             tracing::error!("Failed to create Kubernetes client: {}", e);
             std::process::exit(1);
         }
-    }));
+    });
 
     // Intentionally allow all CORS origins — this is desired behavior for a self-hosted VolSync WebUI
     // that runs inside a Kubernetes cluster and serves the frontend from the same origin.

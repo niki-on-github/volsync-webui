@@ -20,6 +20,9 @@ pub fn BackupPanel(props: &Props) -> Html {
         let app = props.app_name.clone();
         let ns = props.ns.clone();
         Callback::from(move |_| {
+            if *backing_up {
+                return;
+            }
             backing_up.set(true);
             status.set("Starting backup...".to_string());
             let app_clone = app.clone();
@@ -30,8 +33,9 @@ pub fn BackupPanel(props: &Props) -> Html {
                 match trigger_backup(&app_clone, &ns_clone).await {
                     Ok(r) => {
                         backing_up_clone.set(false);
+                        let success = r.result.as_deref().map_or(false, |s| s.eq_ignore_ascii_case("successful"));
                         status_clone.set(
-                            if r.result.as_deref() == Some("Successful") {
+                            if success {
                                 "Backup completed successfully".to_string()
                             } else {
                                 format!("Backup failed: {:?}", r.result)
@@ -52,6 +56,9 @@ pub fn BackupPanel(props: &Props) -> Html {
         let backing_up_all = backing_up_all.clone();
         let results = backup_all_results.clone();
         Callback::from(move |_| {
+            if *backing_up_all {
+                return;
+            }
             backing_up_all.set(true);
             status.set("Starting backup for all apps...".to_string());
             let status_clone = status.clone();
@@ -61,11 +68,11 @@ pub fn BackupPanel(props: &Props) -> Html {
                 match trigger_backup_all().await {
                     Ok(r) => {
                         backing_up_all_clone.set(false);
-                        let failed: Vec<_> = r.apps.iter().filter(|a| !a.success).collect();
-                        let msg = if failed.is_empty() {
+                        let failed = r.apps.iter().filter(|a| !a.success).count();
+                        let msg = if failed == 0 {
                             "All backups completed successfully".to_string()
                         } else {
-                            format!("{} of {} backups failed", failed.len(), r.apps.len())
+                            format!("{} of {} backups failed", failed, r.apps.len())
                         };
                         status_clone.set(msg);
                         results_clone.set(Some(r));
@@ -106,7 +113,7 @@ pub fn BackupPanel(props: &Props) -> Html {
                     <div class="space-y-1">
                         {results.apps.iter().map(|r| {
                             html! {
-                                <div class="flex items-center gap-2 text-sm">
+                                <div key={format!("{}/{}", r.app, r.namespace)} class="flex items-center gap-2 text-sm">
                                     <span class={if r.success { "text-green-400" } else { "text-red-400" }}>
                                         {if r.success { "✓" } else { "✗" }}
                                     </span>

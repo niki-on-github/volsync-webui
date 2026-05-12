@@ -13,24 +13,34 @@ pub fn AppComponent() -> Html {
     let selected_app: UseStateHandle<Option<App>> = use_state(|| None);
     let snapshots: UseStateHandle<Vec<Snapshot>> = use_state(Vec::new);
     let loading_snapshots: UseStateHandle<bool> = use_state(|| false);
-    // Bug #6 fix: Track selected namespace for filtering
     let selected_namespace: UseStateHandle<String> = use_state(String::new);
+    let namespace_error: UseStateHandle<Option<String>> = use_state(|| None);
+    let app_error: UseStateHandle<Option<String>> = use_state(|| None);
+    // Generation counter to cancel stale snapshot fetches (race condition fix)
+    let snapshot_gen: UseStateHandle<u64> = use_state(|| 0);
 
     {
-        let namespaces_clone = namespaces.clone();
+        let ns_clone = namespaces.clone();
+        let err_clone = namespace_error.clone();
         use_effect_with((), |_| {
             wasm_bindgen_futures::spawn_local(async move {
                 match api::list_namespaces().await {
-                    Ok(ns) => namespaces_clone.set(ns),
-                    Err(e) => log::error!("Failed to load namespaces: {}", e),
+                    Ok(ns) => {
+                        ns_clone.set(ns);
+                        err_clone.set(None);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load namespaces: {}", e);
+                        err_clone.set(Some(e));
+                    }
                 }
             });
         });
     }
 
-    // Bug #6 fix: Reload apps when namespace changes
     {
         let apps_clone = apps.clone();
+        let err_clone = app_error.clone();
         use_effect_with(
             (*selected_namespace).clone(),
             move |ns: &String| {
@@ -39,8 +49,14 @@ pub fn AppComponent() -> Html {
                 wasm_bindgen_futures::spawn_local(async move {
                     let ns_param = if ns_owned.is_empty() { None } else { Some(ns_owned.as_str()) };
                     match api::list_apps(ns_param).await {
-                        Ok(a) => apps.set(a),
-                        Err(e) => log::error!("Failed to load apps: {}", e),
+                        Ok(a) => {
+                            apps.set(a);
+                            err_clone.set(None);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load apps: {}", e);
+                            err_clone.set(Some(e));
+                        }
                     }
                 });
             },
@@ -48,28 +64,35 @@ pub fn AppComponent() -> Html {
     }
 
     {
-        let snapshots_clone = snapshots.clone();
-        let loading_clone = loading_snapshots.clone();
-        let app_clone = (*selected_app).clone();
+        let snaps_clone = snapshots.clone();
+        let load_clone = loading_snapshots.clone();
+        let gen_clone = snapshot_gen.clone();
         use_effect_with(
-            app_clone,
+            (*selected_app).clone(),
             move |app| {
                 if let Some(ref a) = app {
-                    loading_clone.set(true);
+                    gen_clone.set(*gen_clone + 1);
+                    let current_gen = *gen_clone;
+                    let snaps = snaps_clone.clone();
+                    let load = load_clone.clone();
+                    let gen = gen_clone.clone();
+                    load.set(true);
                     let name = a.name.clone();
                     let ns = a.namespace.clone();
-                    let snaps = snapshots_clone.clone();
-                    let load = loading_clone.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         match api::get_snapshots(&name, &ns).await {
                             Ok(s) => {
-                                snaps.set(s);
-                                load.set(false);
+                                if *gen == current_gen {
+                                    snaps.set(s);
+                                    load.set(false);
+                                }
                             }
                             Err(e) => {
-                                snaps.set(Vec::new());
-                                load.set(false);
-                                log::warn!("Failed to load snapshots: {}", e);
+                                if *gen == current_gen {
+                                    snaps.set(Vec::new());
+                                    load.set(false);
+                                    log::warn!("Failed to load snapshots: {}", e);
+                                }
                             }
                         }
                     });
@@ -93,23 +116,31 @@ pub fn AppComponent() -> Html {
         let snapshots = snapshots.clone();
         let loading = loading_snapshots.clone();
         let app = (*selected_app).clone();
+        let gen = snapshot_gen.clone();
         Callback::from(move |_| {
             if let Some(ref a) = app {
-                loading.set(true);
+                gen.set(*gen + 1);
+                let current_gen = *gen;
+                let gen_inner = gen.clone();
                 let name = a.name.clone();
                 let ns = a.namespace.clone();
                 let snaps = snapshots.clone();
                 let load = loading.clone();
+                load.set(true);
                 wasm_bindgen_futures::spawn_local(async move {
                     match api::get_snapshots(&name, &ns).await {
                         Ok(s) => {
-                            snaps.set(s);
-                            load.set(false);
+                            if current_gen == *gen_inner {
+                                snaps.set(s);
+                                load.set(false);
+                            }
                         }
                         Err(e) => {
-                            snaps.set(Vec::new());
-                            load.set(false);
-                            log::warn!("Failed to refresh snapshots: {}", e);
+                            if current_gen == *gen_inner {
+                                snaps.set(Vec::new());
+                                load.set(false);
+                                log::warn!("Failed to refresh snapshots: {}", e);
+                            }
                         }
                     }
                 });

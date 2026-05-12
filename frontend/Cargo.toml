@@ -10,12 +10,12 @@ crate-type = ["cdylib", "rlib"]
 yew.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures = "0.4"
-reqwasm.workspace = true
+
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["HtmlElement", "Window", "Document", "HtmlSelectElement"] }
+web-sys = { version = "0.3", features = ["HtmlElement", "Window", "Document", "HtmlSelectElement", "Headers"] }
 wasm-logger = "0.2"
 log = "0.4"
 

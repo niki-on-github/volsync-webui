@@ -22,7 +22,7 @@ pub fn NamespaceSelector(props: &Props) -> Html {
             >
                 <option value="">{"All Namespaces"}</option>
                 {props.namespaces.iter().map(|ns| {
-                    html! { <option value={ns.clone()}>{ns.clone()}</option> }
+                    html! { <option key={ns.clone()} value={ns.clone()}>{ns.clone()}</option> }
                 }).collect::<Html>()}
             </select>
         </div>

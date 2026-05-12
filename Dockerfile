@@ -26,6 +26,7 @@ COPY frontend/Cargo.toml frontend/
 COPY backend/src backend/src/
 COPY frontend/src frontend/src/
 COPY frontend/index.html frontend/
+COPY frontend/style.css frontend/
 COPY frontend/Trunk.toml frontend/
 COPY frontend/tailwind.config.js frontend/
 

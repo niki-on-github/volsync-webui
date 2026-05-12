@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppQuery {
+    pub namespace: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct App {
     pub name: String,

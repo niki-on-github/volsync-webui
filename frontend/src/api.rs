@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
 use wasm_bindgen::JsCast;
-use web_sys::{Request, RequestInit, Response};
+use web_sys::{Headers, Request, RequestInit, Response};
 use wasm_bindgen_futures::JsFuture;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,68 +71,70 @@ fn get_base_url() -> String {
 
 async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, method: &str, body: Option<&str>) -> Result<T, String> {
     log::debug!("fetch_json: {} {}", method, url);
-    if let Some(b) = body {
-        log::debug!("fetch_json: request body={}", b);
-    }
 
     let opts = RequestInit::new();
     opts.set_method(method);
 
-    // Bug #14 fix: Set Content-Type for POST requests with body
     if let Some(b) = body {
+        log::debug!("fetch_json: request body={}", b);
         opts.set_body(&JsValue::from_str(b));
-        let headers = js_sys::Object::new();
-        js_sys::Reflect::set(&headers, &JsValue::from_str("Content-Type"), &JsValue::from_str("application/json")).ok();
+        let headers = Headers::new().map_err(|_| {
+            let msg = "Failed to create Headers".to_string();
+            log::error!("{}", msg);
+            msg
+        })?;
+        headers.set("Content-Type", "application/json").map_err(|_| {
+            let msg = "Failed to set Content-Type header".to_string();
+            log::error!("{}", msg);
+            msg
+        })?;
         opts.set_headers(&headers);
     }
 
     let request = Request::new_with_str_and_init(url, &opts).map_err(|e| {
-        log::error!("fetch_json: failed to create request for {}: {}", url, e.as_string().unwrap_or_default());
-        e.as_string().unwrap_or_default()
+        let msg = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+        log::error!("fetch_json: failed to create request for {}: {}", url, msg);
+        msg
     })?;
 
     let window = web_sys::window().ok_or("No window")?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
         .map_err(|e| {
-            log::error!("fetch_json: fetch failed for {}: {}", url, e.as_string().unwrap_or_default());
-            e.as_string().unwrap_or_default()
+            let msg = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+            log::error!("fetch_json: fetch failed for {}: {}", url, msg);
+            msg
         })?;
     let resp: Response = resp_value.dyn_into().map_err(|e| {
-        log::error!("fetch_json: failed to dyn_into Response for {}: {}", url, e.as_string().unwrap_or_default());
-        e.as_string().unwrap_or_default()
+        let msg = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+        log::error!("fetch_json: failed to dyn_into Response for {}: {}", url, msg);
+        msg
     })?;
 
-    // Bug #9 fix: Check HTTP status code before parsing response
+    let body_text = JsFuture::from(resp.text().map_err(|e| {
+        let msg = e.as_string().unwrap_or_else(|| format!("{:?}", e));
+        log::error!("fetch_json: failed to get response text for {}: {}", url, msg);
+        msg
+    })?)
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{:?}", e)))?
+        .as_string()
+        .ok_or_else(|| {
+            let msg = format!("Response body is not a string for {}", url);
+            log::error!("{}", msg);
+            msg
+        })?;
+
     let status = resp.status();
     if status >= 400 {
-        let error_text = JsFuture::from(resp.text().map_err(|e| e.as_string().unwrap_or_default())?)
-            .await
-            .map_err(|e| e.as_string().unwrap_or_default())?
-            .as_string()
-            .unwrap_or_default();
-        log::error!("fetch_json: HTTP {} for {}: {}", status, url, error_text);
-        return Err(format!("HTTP {}: {}", status, error_text));
+        log::error!("fetch_json: HTTP {} for {}: {}", status, url, body_text);
+        return Err(format!("HTTP {}: {}", status, body_text));
     }
 
-    let json_str = JsFuture::from(resp.text().map_err(|e| e.as_string().unwrap_or_default())?)
-        .await
-        .map_err(|e| {
-            log::error!("fetch_json: failed to get response text for {}: {}", url, e.as_string().unwrap_or_default());
-            e.as_string().unwrap_or_default()
-        })?
-        .as_string()
-        .ok_or("Failed to get response text")?;
-
-    let result = serde_json::from_str::<T>(&json_str).map_err(|e| {
-        log::error!("fetch_json: failed to parse JSON for {}: {}", url, e);
+    serde_json::from_str::<T>(&body_text).map_err(|e| {
+        log::error!("fetch_json: failed to parse JSON for {}: {} (body: {})", url, e, body_text);
         e.to_string()
-    });
-
-    if result.is_ok() {
-        log::debug!("fetch_json: success {} {}", method, url);
-    }
-    result
+    })
 }
 
 pub async fn list_namespaces() -> Result<Vec<String>, String> {

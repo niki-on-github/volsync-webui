@@ -8,9 +8,8 @@ use axum::{
 };
 use chrono::Utc;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
-pub type AppState = Arc<RwLock<Kubectl>>;
+pub type AppState = Arc<Kubectl>;
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -49,16 +48,12 @@ impl IntoResponse for ApiError {
 
 pub async fn list_apps(
     State(kubectl): State<AppState>,
-    axum::extract::Query(namespace): axum::extract::Query<Option<String>>,
+    axum::extract::Query(query): axum::extract::Query<AppQuery>,
 ) -> Result<Json<Vec<App>>, ApiError> {
-    let ns_filter = namespace.as_deref().unwrap_or("all");
+    let ns_filter = query.namespace.as_deref().unwrap_or("all");
     tracing::debug!("list_apps called with namespace filter: {}", ns_filter);
 
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
-    let apps = kubectl.list_apps(namespace.as_deref()).await.map_err(ApiError::from)?;
+    let apps = kubectl.list_apps(query.namespace.as_deref()).await.map_err(ApiError::from)?;
     tracing::debug!("list_apps returning {} apps", apps.len());
     Ok(Json(apps))
 }
@@ -66,10 +61,6 @@ pub async fn list_apps(
 pub async fn list_namespaces(State(kubectl): State<AppState>) -> Result<Json<Vec<String>>, ApiError> {
     tracing::debug!("list_namespaces called");
 
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
     let namespaces = kubectl.list_namespaces().await.map_err(ApiError::from)?;
     tracing::debug!("list_namespaces returning {} namespaces", namespaces.len());
     Ok(Json(namespaces))
@@ -81,10 +72,6 @@ pub async fn get_snapshots(
 ) -> Result<Json<Vec<Snapshot>>, ApiError> {
     tracing::debug!("get_snapshots called for app={} namespace={}", app, ns);
 
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
     let snapshots = kubectl.get_snapshots(&app, &ns).await.map_err(ApiError::from)?;
     tracing::debug!("get_snapshots returning {} snapshots for app={}", snapshots.len(), app);
     Ok(Json(snapshots))
@@ -96,11 +83,6 @@ pub async fn trigger_backup(
 ) -> Result<Json<BackupResponse>, ApiError> {
     tracing::info!("trigger_backup called for app={} namespace={}", app, ns);
 
-    // Clone Kubectl and drop lock before long polling loop (Bug #2 fix)
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup using trigger ID: {}", trigger);
     let resp = kubectl.trigger_backup(&app, &ns, &trigger).await.map_err(ApiError::from)?;
@@ -111,16 +93,10 @@ pub async fn trigger_backup(
 pub async fn trigger_backup_all(State(kubectl): State<AppState>) -> Result<Json<BackupAllResponse>, ApiError> {
     tracing::info!("trigger_backup_all called");
 
-    // Clone Kubectl and drop lock before spawning concurrent tasks (Bug #3 fix)
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup_all using trigger ID: {}", trigger);
     let apps = kubectl.trigger_backup_all(&trigger).await.map_err(ApiError::from)?;
 
-    // Aggregate summary
     let total = apps.len();
     let success = apps.iter().filter(|a| a.success).count();
     let failed = total - success;
@@ -142,10 +118,6 @@ pub async fn trigger_restore(
     State(kubectl): State<AppState>,
     Json(req): Json<RestoreRequest>,
 ) -> Result<Json<RestoreResponse>, ApiError> {
-    let kubectl = {
-        let guard = kubectl.read().await;
-        guard.clone()
-    };
     let resp = kubectl.trigger_restore(&app, &ns, &req.trigger, req.timestamp.as_deref())
         .await
         .map_err(ApiError::from)?;

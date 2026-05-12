@@ -81,7 +81,7 @@ pub fn RestorePanel(props: &Props) -> Html {
                     <option value="">{"Latest (no timestamp)"}</option>
                     {props.snapshots.iter().map(|snap| {
                         let label = format!("{} - {}", snap.id, snap.time);
-                        html! { <option value={snap.time.clone()}>{label}</option> }
+                        html! { <option key={snap.id.clone()} value={snap.time.clone()}>{label}</option> }
                     }).collect::<Html>()}
                 </select>
             </div>
