@@ -24,6 +24,7 @@ const SORT_LABELS: Record<SortKey, string> = {
   next_sync_time: "Next Backup",
   in_progress: "",
   paused: "",
+  repository: "",
 };
 
 const SORT_COLUMNS: SortKey[] = [

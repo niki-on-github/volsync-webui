@@ -64,6 +64,8 @@ pub struct Kubectl {
     client: Client,
     base_url: String,
     api_group: String,
+    source_suffix: String,
+    dest_suffix: String,
     token: Option<String>,
 }
 
@@ -75,6 +77,11 @@ impl Kubectl {
 
         let api_group = std::env::var("VOLSYNC_API_GROUP")
             .unwrap_or_else(|_| "volsync.backube".to_string());
+
+        let source_suffix = std::env::var("VOLSYNC_SOURCE_SUFFIX")
+            .unwrap_or_else(|_| "-backup".to_string());
+        let dest_suffix = std::env::var("VOLSYNC_DEST_SUFFIX")
+            .unwrap_or_else(|_| "-bootstrap".to_string());
 
         let token_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token");
         let token = if token_path.exists() {
@@ -121,7 +128,12 @@ impl Kubectl {
             client_builder.build().unwrap_or_else(|_| reqwest::Client::new())
         };
 
-        Ok(Self { client, base_url, api_group, token })
+        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, token })
+    }
+
+    fn dest_crd_name(&self, app: &str) -> String {
+        let base = app.strip_suffix(&self.source_suffix).unwrap_or(app);
+        format!("{}{}", base, self.dest_suffix)
     }
 
     pub async fn check_rbac(&self) {
@@ -235,7 +247,12 @@ impl Kubectl {
         }
 
         if let Some(b) = body {
-            req = req.header("Content-Type", "application/json").json(&b);
+            let content_type = if method == "PATCH" {
+                "application/merge-patch+json"
+            } else {
+                "application/json"
+            };
+            req = req.header("Content-Type", content_type).json(&b);
         }
 
         req.send().await.map_err(|e| KubeError::Api(e.to_string()))
@@ -290,6 +307,12 @@ impl Kubectl {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            let repository = spec
+                .and_then(|s| s.get("restic"))
+                .and_then(|r| r.get("repository"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
             Some(App {
                 name,
                 namespace: namespace_item,
@@ -299,6 +322,7 @@ impl Kubectl {
                 next_sync_time,
                 in_progress,
                 paused,
+                repository,
             })
         }).collect();
 
@@ -574,6 +598,30 @@ impl Kubectl {
         parse_snapshots(&logs)
     }
 
+    pub async fn get_dest_repository(&self, app: &str, ns: &str) -> Result<Option<String>, KubeError> {
+        let dst_name = self.dest_crd_name(app);
+        let dst_url = format!(
+            "/apis/{}/v1alpha1/namespaces/{}/replicationdestinations/{}",
+            self.api_group, ns, dst_name
+        );
+        match self.request("GET", &dst_url, None).await {
+            Ok(dst) => Ok(dst
+                .get("spec")
+                .and_then(|s| s.get("restic"))
+                .and_then(|r| r.get("repository"))
+                .and_then(|v| v.as_str())
+                .map(String::from)),
+            Err(KubeError::NotFound(_)) => {
+                tracing::debug!("Destination CRD {} not found for app={}", dst_name, app);
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch destination {} for app={}: {}", dst_name, app, e);
+                Ok(None)
+            }
+        }
+    }
+
     pub async fn trigger_restore(&self, app: &str, ns: &str, trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
 
@@ -607,7 +655,7 @@ impl Kubectl {
             tracing::info!("trigger_restore deployment scaled to 0 for app={}", app);
         }
 
-        let dst_name = format!("{}-dst", app);
+        let dst_name = self.dest_crd_name(app);
         let dst_url = format!(
             "/apis/{}/v1alpha1/namespaces/{}/replicationdestinations/{}",
             self.api_group, ns, dst_name
@@ -719,21 +767,45 @@ fn is_successful(result: &Option<String>) -> bool {
 fn parse_snapshots(logs: &str) -> Result<Vec<Snapshot>, KubeError> {
     let mut snapshots = Vec::new();
     for line in logs.lines() {
-        // Restic --json outputs one JSON object per line, but may also output non-JSON
-        // status messages (e.g., "scanning...", error messages). Skip non-JSON lines.
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(snap) = serde_json::from_str::<Value>(line) {
             let id = snap.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let time_str = snap.get("time").and_then(|v| v.as_str()).unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            let short_id = snap.get("short_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let time_str = snap.get("time").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let hostname = snap.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let paths: Vec<String> = snap.get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
             let tags: Vec<String> = snap.get("tags")
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            if !id.is_empty() {
-                snapshots.push(Snapshot { id, time: time_str.to_string(), tags });
-            }
+            let summary = snap.get("summary");
+            let files_new = summary.and_then(|s| s.get("files_new")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let files_changed = summary.and_then(|s| s.get("files_changed")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let files_unmodified = summary.and_then(|s| s.get("files_unmodified")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let data_added = summary.and_then(|s| s.get("data_added")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let total_files_processed = summary.and_then(|s| s.get("total_files_processed")).and_then(|v| v.as_i64()).unwrap_or(0);
+
+            snapshots.push(Snapshot {
+                id,
+                short_id,
+                time: time_str,
+                tags,
+                paths,
+                hostname,
+                files_new,
+                files_changed,
+                files_unmodified,
+                data_added,
+                total_files_processed,
+            });
         }
     }
     Ok(snapshots)

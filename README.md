@@ -158,7 +158,7 @@ rules:
     resources: ["replicationsources", "replicationdestinations"]
     verbs: ["get", "list", "patch", "watch"]
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "pods/log"]
     verbs: ["get", "list", "create", "delete"]
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -180,11 +180,22 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 | `RUST_LOG` | `debug` | Logging level (trace, debug, info, warn, error) |
 | `KUBERNETES_SERVICE_HOST` | auto-detected | Kubernetes API server host |
 | `VOLSYNC_API_GROUP` | `volsync.backube` | API group for VolSync CRDs (set to `replication.storage.io` for older clusters) |
+| `VOLSYNC_SOURCE_SUFFIX` | `-backup` | Suffix on ReplicationSource CRD names (e.g. `gitea-backup`) |
+| `VOLSYNC_DEST_SUFFIX` | `-bootstrap` | Suffix on ReplicationDestination CRD names (e.g. `gitea-bootstrap`) |
 | `REFRESH_INTERVAL_SECS` | `3600` | Frontend auto-refresh interval in seconds (1 hour default) |
 | `BACKUP_ALL_CONCURRENCY` | `5` | Max concurrent backups for backup-all |
 | `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
 | `POLL_INTERVAL_SECS` | `2` | Backup/restore poll interval in seconds |
 | `POD_STARTUP_TIMEOUT_SECS` | `60` | Snapshot pod startup timeout in seconds |
+
+### Suffix Configuration
+
+The app name shown in the dashboard is the ReplicationSource CRD name (e.g. `gitea-backup`).
+The destination CRD name is derived by stripping `VOLSYNC_SOURCE_SUFFIX` and appending `VOLSYNC_DEST_SUFFIX`:
+
+```
+gitea-backup  → strips -backup  → gitea  → appends -bootstrap  → gitea-bootstrap
+```
 
 ### API Group Configuration
 

@@ -7,12 +7,21 @@ export interface App {
   next_sync_time: string | null;
   in_progress: boolean;
   paused: boolean;
+  repository: string | null;
 }
 
 export interface Snapshot {
   id: string;
+  short_id: string;
   time: string;
   tags: string[];
+  paths: string[];
+  hostname: string;
+  files_new: number;
+  files_changed: number;
+  files_unmodified: number;
+  data_added: number;
+  total_files_processed: number;
 }
 
 export interface BackupResponse {

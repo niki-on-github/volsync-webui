@@ -65,6 +65,16 @@ export const api = {
     }
   },
 
+  async getDestRepository(app: string, ns: string): Promise<string | null> {
+    try {
+      return await fetchJson<string | null>(
+        `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/destination/repository`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
   async triggerRestore(
     app: string,
     ns: string,

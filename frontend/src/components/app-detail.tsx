@@ -80,11 +80,15 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
+  const [destRepo, setDestRepo] = useState<string | null>(null);
+  const [destLoaded, setDestLoaded] = useState(false);
 
   useEffect(() => {
     setTimestamp("");
     setBackupStatus(null);
     setRestoreStatus(null);
+    setDestRepo(null);
+    setDestLoaded(false);
     setSnapshots([]);
     setSnapshotError(null);
     let cancelled = false;
@@ -99,6 +103,16 @@ export function AppDetail({ app, onBackupComplete }: Props) {
       })
       .finally(() => { if (!cancelled) setLoadingSnapshots(false); });
     return () => { cancelled = true; };
+  }, [app.name, app.namespace]);
+
+  // Lazy-fetch destination repository
+  useEffect(() => {
+    setDestRepo(null);
+    setDestLoaded(false);
+    api.getDestRepository(app.name, app.namespace).then((r) => {
+      setDestRepo(r);
+      setDestLoaded(true);
+    });
   }, [app.name, app.namespace]);
 
   const handleBackup = async () => {
@@ -180,6 +194,8 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                 ? new Date(app.next_sync_time).toLocaleString()
                 : "-"}
             </div>
+            <div className="text-muted-foreground">Repository:</div>
+            <div className="font-mono text-xs">{app.repository ?? "-"}</div>
           </div>
           <div className="flex items-center gap-3">
             <Button onClick={handleBackup} disabled={backingUp} size="sm">
@@ -194,7 +210,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
 
         {/* ── Snapshots Section ── */}
         <Section title={
-          <><Clock className="h-4 w-4" /> Snapshots</>
+          <><Clock className="h-4 w-4" /> Snapshots ({snapshots.length})</>
         }>
           {loadingSnapshots ? (
             <p className="text-sm text-muted-foreground">Loading snapshots...</p>
@@ -203,36 +219,53 @@ export function AppDetail({ app, onBackupComplete }: Props) {
           ) : snapshots.length === 0 ? (
             <p className="text-sm text-muted-foreground">No snapshots found</p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>ID</TableHead>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Tags</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {snapshots.map((snap) => (
-                  <TableRow key={snap.id}>
-                    <TableCell className="font-mono text-xs">
-                      {snap.id.substring(0, 12)}
-                    </TableCell>
-                    <TableCell>
-                      {new Date(snap.time).toLocaleString()}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {snap.tags.map((tag) => (
-                          <Badge key={tag} variant="secondary">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
-                    </TableCell>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>ID</TableHead>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Files</TableHead>
+                    <TableHead>Data</TableHead>
+                    <TableHead>Host</TableHead>
+                    <TableHead>Tags</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {snapshots.map((snap) => (
+                    <TableRow key={snap.id}>
+                      <TableCell className="font-mono text-xs">{snap.short_id}</TableCell>
+                      <TableCell className="whitespace-nowrap text-xs">
+                        {new Date(snap.time).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-xs whitespace-nowrap">
+                        <span className="text-green-400" title="new">+{snap.files_new}</span>{" "}
+                        <span className="text-yellow-400" title="changed">~{snap.files_changed}</span>{" "}
+                        <span className="text-muted-foreground" title="unmodified">{snap.files_unmodified}</span>
+                        <span className="text-muted-foreground ml-1">({snap.total_files_processed})</span>
+                      </TableCell>
+                      <TableCell className="text-xs font-mono">
+                        {snap.data_added > 0
+                          ? snap.data_added > 1_000_000
+                            ? `${(snap.data_added / 1_000_000).toFixed(1)}MB`
+                            : `${(snap.data_added / 1_000).toFixed(0)}KB`
+                          : "-"}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{snap.hostname || "-"}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {snap.tags.length > 0
+                            ? snap.tags.map((tag) => (
+                                <Badge key={tag} variant="secondary">{tag}</Badge>
+                              ))
+                            : <span className="text-muted-foreground text-xs">-</span>}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </Section>
 
@@ -277,6 +310,12 @@ export function AppDetail({ app, onBackupComplete }: Props) {
               </span>
             )}
           </div>
+          {destLoaded && (
+            <div className="grid grid-cols-2 gap-2 text-sm mt-3">
+              <div className="text-muted-foreground">Repository:</div>
+              <div className="font-mono text-xs">{destRepo ?? "none"}</div>
+            </div>
+          )}
         </Section>
 
       </CardContent>

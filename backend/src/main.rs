@@ -2,7 +2,7 @@ mod api;
 mod kubectl;
 mod models;
 
-use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore, get_config};
+use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore, get_config, get_dest_repository};
 use std::sync::Arc;
 use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
@@ -109,6 +109,7 @@ async fn main() {
         .route("/api/apps/:app/:ns/backup", axum::routing::post(trigger_backup))
         .route("/api/apps/:app/:ns/restore", axum::routing::post(trigger_restore))
         .route("/api/apps/backup-all", axum::routing::post(trigger_backup_all))
+        .route("/api/apps/:app/:ns/destination/repository", axum::routing::get(get_dest_repository))
         .fallback(axum::routing::get(serve_static))
         .with_state(kubectl)
         .layer(cors);

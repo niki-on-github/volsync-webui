@@ -10,13 +10,22 @@ pub struct App {
     pub next_sync_time: Option<String>,
     pub in_progress: bool,
     pub paused: bool,
+    pub repository: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub id: String,
+    pub short_id: String,
     pub time: String,
     pub tags: Vec<String>,
+    pub paths: Vec<String>,
+    pub hostname: String,
+    pub files_new: i64,
+    pub files_changed: i64,
+    pub files_unmodified: i64,
+    pub data_added: i64,
+    pub total_files_processed: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

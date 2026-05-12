@@ -131,6 +131,17 @@ pub async fn trigger_restore(
     Ok(Json(resp))
 }
 
+pub async fn get_dest_repository(
+    Path((app, ns)): Path<(String, String)>,
+    State(kubectl): State<AppState>,
+) -> Result<Json<Option<String>>, ApiError> {
+    let repo = kubectl.get_dest_repository(&app, &ns).await.map_err(|e| {
+        tracing::error!("get_dest_repository failed for app={} ns={}: {}", app, ns, e);
+        ApiError::from(e)
+    })?;
+    Ok(Json(repo))
+}
+
 pub async fn get_config() -> Json<AppConfig> {
     let interval = std::env::var("REFRESH_INTERVAL_SECS")
         .ok()
