@@ -295,6 +295,42 @@ impl Kubectl {
         }
     }
 
+    async fn wait_for_pods_terminated(&self, names: &[String], ns: &str, timeout_secs: u64) {
+        let start = std::time::Instant::now();
+        let poll_interval = polling_interval_secs();
+        loop {
+            if start.elapsed() > Duration::from_secs(timeout_secs) {
+                tracing::warn!(
+                    "wait_for_pods_terminated timed out after {}s — proceeding anyway",
+                    timeout_secs
+                );
+                return;
+            }
+            let mut all_gone = true;
+            for name in names {
+                let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, name);
+                match self.request("GET", &url, None).await {
+                    Ok(deploy) => {
+                        let replicas = deploy
+                            .get("status")
+                            .and_then(|s| s.get("replicas"))
+                            .and_then(|r| r.as_i64())
+                            .unwrap_or(0);
+                        if replicas > 0 {
+                            all_gone = false;
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            if all_gone {
+                tracing::info!("wait_for_pods_terminated: all pods terminated");
+                return;
+            }
+            sleep(Duration::from_secs(poll_interval)).await;
+        }
+    }
+
     pub async fn check_rbac(&self) {
         let checks: Vec<(&str, String)> = vec![
             (
@@ -646,6 +682,15 @@ impl Kubectl {
         let task_key = format!("{}/{}/backup", ns, app);
         let restore_key = format!("{}/{}/restore", ns, app);
 
+        let task = TaskStatus {
+            task_type: "backup".to_string(),
+            app: app.clone(),
+            namespace: ns.clone(),
+            status: "pending".to_string(),
+            result: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
         {
             let mut tasks = self.tasks.write().await;
             if let Some(existing) = tasks.get(&task_key) {
@@ -659,19 +704,6 @@ impl Kubectl {
                 }
             }
             tasks.remove(&task_key);
-        }
-
-        let task = TaskStatus {
-            task_type: "backup".to_string(),
-            app: app.clone(),
-            namespace: ns.clone(),
-            status: "pending".to_string(),
-            result: None,
-            error: None,
-            started_at: chrono::Utc::now().to_rfc3339(),
-        };
-        {
-            let mut tasks = self.tasks.write().await;
             tasks.insert(task_key.clone(), task.clone());
         }
 
@@ -721,6 +753,15 @@ impl Kubectl {
         let task_key = format!("{}/{}/restore", ns, app);
         let backup_key = format!("{}/{}/backup", ns, app);
 
+        let task = TaskStatus {
+            task_type: "restore".to_string(),
+            app: app.clone(),
+            namespace: ns.clone(),
+            status: "pending".to_string(),
+            result: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
         {
             let mut tasks = self.tasks.write().await;
             if let Some(existing) = tasks.get(&task_key) {
@@ -734,19 +775,6 @@ impl Kubectl {
                 }
             }
             tasks.remove(&task_key);
-        }
-
-        let task = TaskStatus {
-            task_type: "restore".to_string(),
-            app: app.clone(),
-            namespace: ns.clone(),
-            status: "pending".to_string(),
-            result: None,
-            error: None,
-            started_at: chrono::Utc::now().to_rfc3339(),
-        };
-        {
-            let mut tasks = self.tasks.write().await;
             tasks.insert(task_key.clone(), task.clone());
         }
 
@@ -970,6 +998,10 @@ impl Kubectl {
         let replica_map = self.read_deployments_replicas(&deploys, ns).await;
         self.scale_deployments(&deploys, ns, 0).await;
 
+        // Wait for pods to fully terminate before touching PVC
+        self.wait_for_pods_terminated(&deploys, ns, 120).await;
+        sleep(Duration::from_secs(5)).await;
+
         // Step 3: Read current RD, save original copyMethod, destinationPVC, restoreAsOf
         let dst_name = self.dest_crd_name(app);
         let dst_url = format!(
@@ -1006,6 +1038,19 @@ impl Kubectl {
 
         // Step 4: PATCH RD with copyMethod=Direct + destinationPVC=<app-pvc>
         let pvc_name = self.pvc_name(&base_app);
+
+        // Verify PVC exists before patching RD
+        let pvc_url = format!(
+            "/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, pvc_name
+        );
+        if let Err(KubeError::NotFound(_)) = self.request("GET", &pvc_url, None).await {
+            return Err(KubeError::Api(format!(
+                "PVC {}/{} not found. Expected PVC name format: {{base}}{}. \
+                 Set VOLSYNC_PVC_SUFFIX env var if your PVC uses a different suffix.",
+                ns, pvc_name, self.pvc_suffix
+            )));
+        }
+
         let mut direct_patch = serde_json::json!({
             "spec": {
                 "restic": {
@@ -1085,113 +1130,136 @@ impl Kubectl {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
-                    let finished = result
-                        .as_deref()
-                        .map_or(false, |r| r.eq_ignore_ascii_case("successful"));
-                    if finished {
-                        tracing::info!(
-                            "trigger_restore completed on poll #{} for app={}",
-                            poll_count,
-                            app
-                        );
-
-                        // Step 7: Revert RD — restore original copyMethod, destinationPVC, restoreAsOf
-                        let mut revert = serde_json::json!({
-                            "spec": { "restic": {} }
-                        });
-                        revert["spec"]["restic"]["copyMethod"] = match original_copy_method {
-                            Some(ref m) => serde_json::json!(m),
-                            None => serde_json::Value::Null,
-                        };
-                        revert["spec"]["restic"]["destinationPVC"] = match original_dest_pvc {
-                            Some(ref p) => serde_json::json!(p),
-                            None => serde_json::Value::Null,
-                        };
-                        revert["spec"]["restic"]["restoreAsOf"] = match original_restore_as_of {
-                            Some(ref t) => serde_json::json!(t),
-                            None => serde_json::Value::Null,
-                        };
-
-                        if let Err(e) = self
-                            .request("PATCH", &dst_url, Some(revert))
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to revert ReplicationDestination (data is restored, \
-                                 manual cleanup may be needed): {}",
-                                e
-                            );
-                        } else {
+                    match result.as_deref() {
+                        Some("successful") => {
                             tracing::info!(
-                                "ReplicationDestination reverted to original spec for app={}",
-                                base_app
+                                "trigger_restore completed on poll #{} for app={}",
+                                poll_count,
+                                app
                             );
-                        }
 
-                        // Step 8: Scale deployments back to original replicas (before unsuspending,
-                        //         so Flux sees no drift and recovery is instant)
-                        for (name, replicas) in &replica_map {
-                            let scale_url = format!(
-                                "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
-                                ns, name
-                            );
+                            // Step 7: Revert RD — restore original copyMethod, destinationPVC, restoreAsOf
+                            let mut revert = serde_json::json!({
+                                "spec": { "restic": {} }
+                            });
+                            revert["spec"]["restic"]["copyMethod"] = match original_copy_method {
+                                Some(ref m) => serde_json::json!(m),
+                                None => serde_json::Value::Null,
+                            };
+                            revert["spec"]["restic"]["destinationPVC"] = match original_dest_pvc {
+                                Some(ref p) => serde_json::json!(p),
+                                None => serde_json::Value::Null,
+                            };
+                            revert["spec"]["restic"]["restoreAsOf"] = match original_restore_as_of {
+                                Some(ref t) => serde_json::json!(t),
+                                None => serde_json::Value::Null,
+                            };
+
+                            if let Err(e) = self
+                                .request("PATCH", &dst_url, Some(revert))
+                                .await
+                            {
+                                tracing::error!(
+                                    "Failed to revert ReplicationDestination (data is restored, \
+                                     manual cleanup may be needed): {}",
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "ReplicationDestination reverted to original spec for app={}",
+                                    base_app
+                                );
+                            }
+
+                            // Step 8: Scale deployments back to original replicas
+                            for (name, replicas) in &replica_map {
+                                let scale_url = format!(
+                                    "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
+                                    ns, name
+                                );
+                                if let Err(e) = self
+                                    .request(
+                                        "PATCH",
+                                        &scale_url,
+                                        Some(serde_json::json!({ "spec": { "replicas": replicas } })),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to scale deployment {} back to {} (continuing): {}",
+                                        name, replicas, e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Deployment {} scaled back to {} replicas",
+                                        name, replicas
+                                    );
+                                }
+                            }
+
+                            // Step 9: Unsuspend HelmRelease
                             if let Err(e) = self
                                 .request(
                                     "PATCH",
-                                    &scale_url,
-                                    Some(serde_json::json!({ "spec": { "replicas": replicas } })),
+                                    &hr_url,
+                                    Some(serde_json::json!({ "spec": { "suspended": false } })),
                                 )
                                 .await
                             {
                                 tracing::warn!(
-                                    "Failed to scale deployment {} back to {} (continuing): {}",
-                                    name, replicas, e
+                                    "Failed to unsuspend HelmRelease (continuing): {}",
+                                    e
                                 );
                             } else {
-                                tracing::info!(
-                                    "Deployment {} scaled back to {} replicas",
-                                    name, replicas
-                                );
+                                tracing::info!("HelmRelease unsuspended for app={}", base_app);
+                            }
+
+                            // Step 10: Unsuspend Kustomization
+                            self.unsuspend_kustomization(&base_app).await;
+
+                            tracing::info!("trigger_restore fully finished for app={}", app);
+                            return Ok(RestoreResponse {
+                                trigger: flux_trigger,
+                                status: "completed".to_string(),
+                                result,
+                            });
+                        }
+                        Some(other) => {
+                            tracing::warn!(
+                                "trigger_restore failed on poll #{} for app={}: result={}",
+                                poll_count,
+                                app,
+                                other
+                            );
+                            return Err(KubeError::SnapshotFailed(format!(
+                                "Restore failed with result: {}",
+                                other
+                            )));
+                        }
+                        None => {
+                            // mover hasn't reported result yet, keep polling
+                        }
+                    }
+                }
+            }
+
+            // Check for explicit error conditions in status
+            if let Some(conditions) = dst.get("status")
+                .and_then(|s| s.get("conditions"))
+                .and_then(|c| c.as_array())
+            {
+                for c in conditions {
+                    let cond_type = c.get("type").and_then(|v| v.as_str());
+                    let cond_status = c.get("status").and_then(|v| v.as_str());
+                    let cond_reason = c.get("reason").and_then(|v| v.as_str());
+                    if cond_status == Some("False") && cond_type == Some("Ready") {
+                        if let Some(reason) = cond_reason {
+                            if reason.contains("Error") || reason.contains("Failed") || reason == "RestoreFailed" {
+                                return Err(KubeError::SnapshotFailed(format!(
+                                    "Restore failed: {}", reason
+                                )));
                             }
                         }
-
-                        // Step 9: Unsuspend HelmRelease — Flux sees no drift
-                        if let Err(e) = self
-                            .request(
-                                "PATCH",
-                                &hr_url,
-                                Some(serde_json::json!({ "spec": { "suspended": false } })),
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to unsuspend HelmRelease (continuing): {}",
-                                e
-                            );
-                        } else {
-                            tracing::info!("HelmRelease unsuspended for app={}", base_app);
-                        }
-
-                        // Step 9: Unsuspend Kustomization
-                        self.unsuspend_kustomization(&base_app).await;
-
-                        tracing::info!("trigger_restore fully finished for app={}", app);
-                        return Ok(RestoreResponse {
-                            trigger: flux_trigger,
-                            status: "completed".to_string(),
-                            result,
-                        });
-                    } else {
-                        tracing::warn!(
-                            "trigger_restore failed on poll #{} for app={}: result={:?}",
-                            poll_count,
-                            app,
-                            result
-                        );
-                        return Err(KubeError::SnapshotFailed(format!(
-                            "Restore failed with result: {:?}",
-                            result
-                        )));
                     }
                 }
             }

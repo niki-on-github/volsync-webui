@@ -137,11 +137,11 @@ export function AppDetail({ app, onBackupComplete }: Props) {
         if (taskType === "backup") {
           setBackingUp(false);
           setBackupStatus(status.result ? `Backup completed: ${status.result}` : "Backup completed");
+          onBackupCompleteRef.current();
         } else {
           setRestoring(false);
           setRestoreStatus(status.result ? `Restore completed: ${status.result}` : "Restore completed");
         }
-        onBackupCompleteRef.current();
         return;
       }
       if (status.status === "failed") {
@@ -255,7 +255,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
     }
   };
 
-  const backupLocked = backingUp || app.backup_pending;
+  const backupLocked = backingUp || app.backup_pending || restoring || app.restore_pending;
   const restoreLocked = restoring || app.restore_pending || app.backup_pending;
 
   return (
