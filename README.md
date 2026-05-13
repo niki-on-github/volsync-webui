@@ -2,7 +2,7 @@
 
 A web-based management interface for VolSync replication and backup operations on Kubernetes.
 
-A example deployment of this repository is in the `./example/` direcotry.
+![Screenshot](preview.png)
 
 ## Features
 
