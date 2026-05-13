@@ -43,6 +43,7 @@ import {
 interface Props {
   app: App;
   onBackupComplete: () => void;
+  onRestoreComplete: () => void;
 }
 
 function Section({ title, children }: { title: React.ReactNode; children: React.ReactNode }) {
@@ -91,7 +92,7 @@ function AppHeader({ app }: { app: App }) {
   );
 }
 
-export function AppDetail({ app, onBackupComplete }: Props) {
+export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loadingSnapshots, setLoadingSnapshots] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
@@ -107,6 +108,8 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const mountedRef = useRef(true);
   const onBackupCompleteRef = useRef(onBackupComplete);
   onBackupCompleteRef.current = onBackupComplete;
+  const onRestoreCompleteRef = useRef(onRestoreComplete);
+  onRestoreCompleteRef.current = onRestoreComplete;
 
   const selectedSnap = timestamp && timestamp !== "__latest__"
     ? snapshots.find(s => s.time === timestamp)
@@ -141,6 +144,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
         } else {
           setRestoring(false);
           setRestoreStatus(status.result ? `Restore completed: ${status.result}` : "Restore completed");
+          onRestoreCompleteRef.current();
         }
         return;
       }

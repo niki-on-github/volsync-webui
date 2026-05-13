@@ -37,6 +37,10 @@ export default function App() {
     await loadApps();
   };
 
+  const handleRestoreComplete = async () => {
+    await loadApps();
+  };
+
   // Initial fetch: config + apps
   useEffect(() => {
     api.getConfig()
@@ -80,7 +84,7 @@ export default function App() {
           </div>
           <div>
             {selectedApp ? (
-              <AppDetail app={selectedApp} onBackupComplete={handleBackupComplete} />
+              <AppDetail app={selectedApp} onBackupComplete={handleBackupComplete} onRestoreComplete={handleRestoreComplete} />
             ) : (
               <div className="rounded-lg border bg-card text-card-foreground p-6">
                 <p className="text-sm text-muted-foreground">
