@@ -67,6 +67,7 @@ pub struct Kubectl {
     source_suffix: String,
     dest_suffix: String,
     pvc_suffix: String,
+    kustomization_ns: String,
     token: Option<String>,
     pub tasks: Arc<RwLock<HashMap<String, TaskStatus>>>,
 }
@@ -95,6 +96,9 @@ impl Kubectl {
 
         let pvc_suffix = std::env::var("VOLSYNC_PVC_SUFFIX")
             .unwrap_or_else(|_| "-pvc".to_string());
+
+        let kustomization_ns = std::env::var("VOLSYNC_KUSTOMIZATION_NAMESPACE")
+            .unwrap_or_else(|_| "flux-system".to_string());
 
         let token_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token");
         let token = if token_path.exists() {
@@ -153,7 +157,7 @@ impl Kubectl {
             })
         };
 
-        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, pvc_suffix, token, tasks: Arc::new(RwLock::new(HashMap::new())) })
+        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, pvc_suffix, kustomization_ns, token, tasks: Arc::new(RwLock::new(HashMap::new())) })
     }
 
     fn dest_crd_name(&self, app: &str) -> String {
@@ -172,84 +176,67 @@ impl Kubectl {
         format!("{}{}", base_app, self.pvc_suffix)
     }
 
-    async fn delete_pvc(&self, ns: &str, name: &str) -> Result<(), KubeError> {
-        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
-        match self.request_text("DELETE", &url, None).await {
-            Ok(_) => {
-                tracing::info!("PVC {}/{} deleted", ns, name);
-                Ok(())
-            }
+    fn kustomization_url(&self, base_app: &str) -> String {
+        format!(
+            "/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/{}/kustomizations/{}",
+            self.kustomization_ns, base_app
+        )
+    }
+
+    async fn suspend_kustomization(&self, base_app: &str) {
+        let ks_url = self.kustomization_url(base_app);
+        match self
+            .request(
+                "PATCH",
+                &ks_url,
+                Some(serde_json::json!({ "spec": { "suspended": true } })),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("Kustomization {} suspended", base_app),
             Err(KubeError::NotFound(_)) => {
-                tracing::warn!("PVC {}/{} not found, nothing to delete", ns, name);
-                Ok(())
+                tracing::warn!(
+                    "Kustomization {} not found in ns={}, skipping suspend",
+                    base_app,
+                    self.kustomization_ns
+                );
             }
             Err(e) => {
-                tracing::error!("Failed to delete PVC {}/{}: {}", ns, name, e);
-                Err(e)
+                tracing::warn!(
+                    "Failed to suspend Kustomization {} (continuing): {}",
+                    base_app,
+                    e
+                );
             }
         }
     }
 
-    async fn wait_for_pvc_deleted(&self, ns: &str, name: &str) -> Result<(), KubeError> {
-        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
-        let timeout = Duration::from_secs(30);
-        let start = std::time::Instant::now();
-        while start.elapsed() < timeout {
-            match self.request_text("GET", &url, None).await {
-                Err(KubeError::NotFound(_)) => {
-                    tracing::info!("PVC {}/{} confirmed deleted", ns, name);
-                    return Ok(());
-                }
-                Ok(_) => {
-                    tracing::debug!("PVC {}/{} still exists, waiting...", ns, name);
-                    sleep(Duration::from_secs(2)).await;
-                }
-                Err(e) => {
-                    tracing::warn!("Error polling PVC deletion for {}/{}: {}", ns, name, e);
-                    sleep(Duration::from_secs(2)).await;
-                }
+    async fn unsuspend_kustomization(&self, base_app: &str) {
+        let ks_url = self.kustomization_url(base_app);
+        match self
+            .request(
+                "PATCH",
+                &ks_url,
+                Some(serde_json::json!({ "spec": { "suspended": false } })),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("Kustomization {} unsuspended", base_app),
+            Err(KubeError::NotFound(_)) => {
+                tracing::warn!(
+                    "Kustomization {} not found in ns={}, skipping unsuspend",
+                    base_app,
+                    self.kustomization_ns
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to unsuspend Kustomization {} (continuing): {}",
+                    base_app,
+                    e
+                );
             }
         }
-        Err(KubeError::Timeout(format!(
-            "PVC {}/{} was not deleted within {}s timeout",
-            ns, name, 30
-        )))
-    }
-
-    async fn wait_for_pvc_bound(&self, ns: &str, name: &str) -> Result<(), KubeError> {
-        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
-        let timeout = Duration::from_secs(120);
-        let start = std::time::Instant::now();
-        while start.elapsed() < timeout {
-            match self.request("GET", &url, None).await {
-                Ok(pvc) => {
-                    if let Some(phase) = pvc
-                        .get("status")
-                        .and_then(|s| s.get("phase"))
-                        .and_then(|v| v.as_str())
-                    {
-                        if phase == "Bound" {
-                            tracing::info!("PVC {}/{} is Bound", ns, name);
-                            return Ok(());
-                        }
-                        tracing::debug!("PVC {}/{} phase={}, waiting...", ns, name, phase);
-                    }
-                    sleep(Duration::from_secs(2)).await;
-                }
-                Err(KubeError::NotFound(_)) => {
-                    tracing::debug!("PVC {}/{} not yet created, waiting...", ns, name);
-                    sleep(Duration::from_secs(2)).await;
-                }
-                Err(e) => {
-                    tracing::warn!("Error polling PVC status for {}/{}: {}", ns, name, e);
-                    sleep(Duration::from_secs(2)).await;
-                }
-            }
-        }
-        Err(KubeError::Timeout(format!(
-            "PVC {}/{} did not become Bound within {}s timeout",
-            ns, name, 120
-        )))
     }
 
     async fn find_app_deployments(&self, base: &str, ns: &str) -> Vec<String> {
@@ -273,28 +260,6 @@ impl Kubectl {
                 Vec::new()
             }
         }
-    }
-
-    async fn read_deployments_replicas(&self, names: &[String], ns: &str) -> HashMap<String, i64> {
-        let mut map = HashMap::new();
-        for name in names {
-            let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, name);
-            match self.request("GET", &url, None).await {
-                Ok(deploy) => {
-                    let replicas = deploy.get("spec")
-                        .and_then(|s| s.get("replicas"))
-                        .and_then(|r| r.as_i64())
-                        .unwrap_or(1);
-                    tracing::debug!("read_deployments_replicas: deployment {} has {} replicas", name, replicas);
-                    map.insert(name.clone(), replicas);
-                }
-                Err(e) => {
-                    tracing::warn!("read_deployments_replicas: failed to read deployment {}: {}", name, e);
-                    map.insert(name.clone(), 1);
-                }
-            }
-        }
-        map
     }
 
     async fn scale_deployments(&self, names: &[String], ns: &str, replicas: i64) {
@@ -329,6 +294,10 @@ impl Kubectl {
             (
                 "list PVCs",
                 "/api/v1/persistentvolumeclaims".to_string(),
+            ),
+            (
+                "list Kustomizations",
+                "/apis/kustomize.toolkit.fluxcd.io/v1/kustomizations".to_string(),
             ),
         ];
 
@@ -932,10 +901,13 @@ impl Kubectl {
     }
 
     pub async fn trigger_restore(&self, app: &str, ns: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
-        tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
+        tracing::info!(
+            "trigger_restore starting for app={} namespace={} timestamp={:?}",
+            app, ns, timestamp
+        );
         let base_app = self.app_base_name(app);
 
-        // Step 1: HelmRelease is REQUIRED — fail if not found
+        // Step 0: HelmRelease is REQUIRED — fail if not found
         let hr_url = format!(
             "/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}",
             ns, base_app
@@ -944,8 +916,7 @@ impl Kubectl {
             Ok(_) => tracing::info!("HelmRelease {}/{} found", ns, base_app),
             Err(KubeError::NotFound(_)) => {
                 return Err(KubeError::Api(format!(
-                    "HelmRelease {}/{} not found. Restore requires a Flux-managed HelmRelease \
-                     with a PVC using dataSourceRef pointing to a ReplicationDestination. \
+                    "HelmRelease {}/{} not found. Restore requires a Flux-managed HelmRelease. \
                      See README for setup instructions.",
                     ns, base_app
                 )));
@@ -953,16 +924,37 @@ impl Kubectl {
             Err(e) => return Err(e),
         }
 
-        // Step 2: Trigger restore on ReplicationDestination (app stays running)
+        // Step 0.5: Best-effort suspend Flux Kustomization
+        self.suspend_kustomization(&base_app).await;
+
+        // Step 1: Suspend HelmRelease
+        if let Err(e) = self
+            .request(
+                "PATCH",
+                &hr_url,
+                Some(serde_json::json!({ "spec": { "suspended": true } })),
+            )
+            .await
+        {
+            return Err(KubeError::Api(format!(
+                "Failed to suspend HelmRelease: {}",
+                e
+            )));
+        }
+        tracing::info!("HelmRelease suspended for app={}", base_app);
+
+        // Step 2: Scale down deployments to 0 (detach app from PVC)
+        let deploys = self.find_app_deployments(&base_app, ns).await;
+        self.scale_deployments(&deploys, ns, 0).await;
+
+        // Step 3: Read current RD, save original copyMethod, destinationPVC, restoreAsOf
         let dst_name = self.dest_crd_name(app);
         let dst_url = format!(
             "/apis/{}/v1alpha1/namespaces/{}/replicationdestinations/{}",
             self.api_group, ns, dst_name
         );
-
         let current_rd: Value = self.request("GET", &dst_url, None).await?;
 
-        // Flux manages spec.trigger.manual — read the current value
         let flux_trigger = current_rd
             .get("spec")
             .and_then(|s| s.get("trigger"))
@@ -979,29 +971,48 @@ impl Kubectl {
         }
         tracing::debug!("trigger_restore using spec.trigger.manual='{}'", flux_trigger);
 
-        // Build restic spec with optional restoreAsOf
-        let mut restic_spec = serde_json::json!({});
+        let original_copy_method = current_rd["spec"]["restic"]["copyMethod"]
+            .as_str()
+            .map(String::from);
+        let original_dest_pvc = current_rd["spec"]["restic"]["destinationPVC"]
+            .as_str()
+            .map(String::from);
+        let original_restore_as_of = current_rd["spec"]["restic"]["restoreAsOf"]
+            .as_str()
+            .map(String::from);
+
+        // Step 4: PATCH RD with copyMethod=Direct + destinationPVC=<app-pvc>
+        let pvc_name = self.pvc_name(&base_app);
+        let mut direct_patch = serde_json::json!({
+            "spec": {
+                "restic": {
+                    "copyMethod": "Direct",
+                    "destinationPVC": pvc_name,
+                }
+            }
+        });
         if let Some(ts) = timestamp {
             if !ts.is_empty() {
-                restic_spec["restoreAsOf"] = serde_json::json!(ts);
+                direct_patch["spec"]["restic"]["restoreAsOf"] = serde_json::json!(ts);
             }
         }
 
-        let dst_patch = serde_json::json!({
-            "spec": { "restic": restic_spec }
-        });
-
-        tracing::debug!("trigger_restore PATCHing ReplicationDestination with restoreAsOf");
-        if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
+        if let Err(e) = self
+            .request("PATCH", &dst_url, Some(direct_patch))
+            .await
+        {
             return Err(KubeError::Api(format!(
-                "Failed to patch ReplicationDestination: {}",
+                "Failed to patch ReplicationDestination with copyMethod=Direct: {}",
                 e
             )));
         }
+        tracing::info!(
+            "ReplicationDestination patched with copyMethod=Direct, destinationPVC={}",
+            pvc_name
+        );
 
-        // Trigger restore by nullifying status.lastManualSync
+        // Step 5: Nullify status.lastManualSync to trigger restore
         let status_url = format!("{}/status", dst_url);
-        tracing::debug!("trigger_restore resetting status.lastManualSync to trigger restore");
         if let Err(e) = self
             .request(
                 "PATCH",
@@ -1017,19 +1028,11 @@ impl Kubectl {
                 e
             )));
         }
-        tracing::info!(
-            "trigger_restore status.lastManualSync reset, waiting for VolSync to process"
-        );
+        tracing::info!("trigger_restore status.lastManualSync reset, waiting for VolSync");
 
-        // Poll until restore completes (app is still running)
+        // Step 6: Poll until restore completes
         let restore_timeout = restore_timeout_secs();
         let poll_interval = polling_interval_secs();
-        tracing::info!(
-            "trigger_restore polling with timeout={}s interval={}s",
-            restore_timeout,
-            poll_interval
-        );
-
         let start = std::time::Instant::now();
         let mut poll_count = 0;
         loop {
@@ -1059,8 +1062,9 @@ impl Kubectl {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
-                    let finished =
-                        result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
+                    let finished = result
+                        .as_deref()
+                        .map_or(false, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
                         tracing::info!(
                             "trigger_restore completed on poll #{} for app={}",
@@ -1068,64 +1072,40 @@ impl Kubectl {
                             app
                         );
 
-                        // --- Post-restore: Suspend HR, scale down, delete PVC, unsuspend ---
+                        // Step 7: Revert RD — restore original copyMethod, destinationPVC, restoreAsOf
+                        let mut revert = serde_json::json!({
+                            "spec": { "restic": {} }
+                        });
+                        revert["spec"]["restic"]["copyMethod"] = match original_copy_method {
+                            Some(ref m) => serde_json::json!(m),
+                            None => serde_json::Value::Null,
+                        };
+                        revert["spec"]["restic"]["destinationPVC"] = match original_dest_pvc {
+                            Some(ref p) => serde_json::json!(p),
+                            None => serde_json::Value::Null,
+                        };
+                        revert["spec"]["restic"]["restoreAsOf"] = match original_restore_as_of {
+                            Some(ref t) => serde_json::json!(t),
+                            None => serde_json::Value::Null,
+                        };
 
-                        let pvc_name = self.pvc_name(&base_app);
-
-                        // 3. Suspend HelmRelease
                         if let Err(e) = self
-                            .request(
-                                "PATCH",
-                                &hr_url,
-                                Some(serde_json::json!({ "spec": { "suspended": true } })),
-                            )
+                            .request("PATCH", &dst_url, Some(revert))
                             .await
                         {
-                            tracing::warn!(
-                                "Failed to suspend HelmRelease (continuing): {}",
+                            tracing::error!(
+                                "Failed to revert ReplicationDestination (data is restored, \
+                                 manual cleanup may be needed): {}",
                                 e
                             );
                         } else {
-                            tracing::info!("HelmRelease suspended for app={}", base_app);
+                            tracing::info!(
+                                "ReplicationDestination reverted to original spec for app={}",
+                                base_app
+                            );
                         }
 
-                        // 4. Scale down deployments to 0 (detach from PVC)
-                        let deploys = self.find_app_deployments(&base_app, ns).await;
-                        let replica_map =
-                            self.read_deployments_replicas(&deploys, ns).await;
-                        self.scale_deployments(&deploys, ns, 0).await;
-
-                        // Helper to scale back up on error
-                        let scale_back = || async {
-                            for (name, replicas) in &replica_map {
-                                let scale_url = format!(
-                                    "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
-                                    ns, name
-                                );
-                                let _ = self
-                                    .request(
-                                        "PATCH",
-                                        &scale_url,
-                                        Some(serde_json::json!({ "spec": { "replicas": replicas } })),
-                                    )
-                                    .await;
-                            }
-                        };
-
-                        // 5. Delete the application PVC
-                        if let Err(e) = self.delete_pvc(ns, &pvc_name).await {
-                            scale_back().await;
-                            return Err(e);
-                        }
-                        if let Err(e) =
-                            self.wait_for_pvc_deleted(ns, &pvc_name).await
-                        {
-                            scale_back().await;
-                            return Err(e);
-                        }
-
-                        // 6. Unsuspend HelmRelease — Flux recreates PVC,
-                        //    dataSourceRef resolves to the new VolSync snapshot
+                        // Step 8: Unsuspend HelmRelease — Flux scales up
                         if let Err(e) = self
                             .request(
                                 "PATCH",
@@ -1134,31 +1114,18 @@ impl Kubectl {
                             )
                             .await
                         {
-                            scale_back().await;
-                            return Err(KubeError::Api(format!(
-                                "Restore data is ready but failed to unsuspend HelmRelease: {}. \
-                                 Manual intervention required: unsuspend the HelmRelease to \
-                                 recreate the PVC from the new snapshot.",
-                                e
-                            )));
-                        }
-                        tracing::info!("HelmRelease unsuspended for app={}", base_app);
-
-                        // 7. Wait for Flux to recreate PVC and bind it
-                        if let Err(e) =
-                            self.wait_for_pvc_bound(ns, &pvc_name).await
-                        {
                             tracing::warn!(
-                                "PVC {} did not become Bound (Flux will keep retrying): {}",
-                                pvc_name,
+                                "Failed to unsuspend HelmRelease (continuing): {}",
                                 e
                             );
+                        } else {
+                            tracing::info!("HelmRelease unsuspended for app={}", base_app);
                         }
 
-                        tracing::info!(
-                            "trigger_restore fully finished for app={}",
-                            app
-                        );
+                        // Step 9: Unsuspend Kustomization
+                        self.unsuspend_kustomization(&base_app).await;
+
+                        tracing::info!("trigger_restore fully finished for app={}", app);
                         return Ok(RestoreResponse {
                             trigger: flux_trigger,
                             status: "completed".to_string(),
