@@ -864,7 +864,13 @@ impl Kubectl {
 
         // Read current spec.trigger.manual — this is what Flux maintains as the desired state.
         // If unset (non-Flux app), generate one so the poll loop has something to match.
-        let current_rd: Value = self.request("GET", &dst_url, None).await?;
+        let current_rd: Value = match self.request("GET", &dst_url, None).await {
+            Ok(rd) => rd,
+            Err(e) => {
+                self.resume_restore(app, ns, &replica_map).await;
+                return Err(e);
+            }
+        };
         let mut flux_trigger = current_rd.get("spec")
             .and_then(|s| s.get("trigger"))
             .and_then(|t| t.get("manual"))
@@ -927,7 +933,13 @@ impl Kubectl {
             }
             sleep(Duration::from_secs(poll_interval)).await;
 
-            let dst: Value = self.request("GET", &dst_url, None).await?;
+            let dst: Value = match self.request("GET", &dst_url, None).await {
+                Ok(d) => d,
+                Err(e) => {
+                    self.resume_restore(app, ns, &replica_map).await;
+                    return Err(e);
+                }
+            };
 
             if let Some(last_sync) = dst.get("status")
                 .and_then(|s| s.get("lastManualSync"))

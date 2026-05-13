@@ -37,23 +37,6 @@ export interface Snapshot {
   total_bytes_processed: number;
 }
 
-export interface BackupResponse {
-  trigger: string;
-  status: string;
-  result: string | null;
-}
-
-export interface RestoreRequest {
-  trigger: string;
-  timestamp: string | null;
-}
-
-export interface RestoreResponse {
-  trigger: string;
-  status: string;
-  result: string | null;
-}
-
 export interface AppConfig {
   refresh_interval_secs: number;
 }
