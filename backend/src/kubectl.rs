@@ -1131,7 +1131,7 @@ impl Kubectl {
                         .map(String::from);
 
                     match result.as_deref() {
-                        Some("successful") => {
+                        Some(r) if r.eq_ignore_ascii_case("successful") => {
                             tracing::info!(
                                 "trigger_restore completed on poll #{} for app={}",
                                 poll_count,
