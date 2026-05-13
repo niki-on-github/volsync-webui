@@ -1,6 +1,7 @@
 use crate::models::{App, AppBackupStatus, BackupResponse, RestoreResponse, Snapshot};
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -161,6 +162,62 @@ impl Kubectl {
             .filter(|s| !s.is_empty())
             .unwrap_or(app)
             .to_string()
+    }
+
+    async fn find_app_deployments(&self, base: &str, ns: &str) -> Vec<String> {
+        let list_url = format!(
+            "/apis/apps/v1/namespaces/{}/deployments?labelSelector=app.kubernetes.io/instance={}",
+            ns, base
+        );
+        match self.request("GET", &list_url, None).await {
+            Ok(resp) => {
+                let names: Vec<String> = resp.get("items")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("metadata")?.get("name")?.as_str().map(String::from))
+                    .collect();
+                tracing::debug!("find_app_deployments found {} deployments for app={} in ns={}", names.len(), base, ns);
+                names
+            }
+            Err(e) => {
+                tracing::warn!("find_app_deployments failed for app={} in ns={} (non-Flux apps can ignore this): {}", base, ns, e);
+                Vec::new()
+            }
+        }
+    }
+
+    async fn read_deployments_replicas(&self, names: &[String], ns: &str) -> HashMap<String, i64> {
+        let mut map = HashMap::new();
+        for name in names {
+            let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, name);
+            match self.request("GET", &url, None).await {
+                Ok(deploy) => {
+                    let replicas = deploy.get("spec")
+                        .and_then(|s| s.get("replicas"))
+                        .and_then(|r| r.as_i64())
+                        .unwrap_or(1);
+                    tracing::debug!("read_deployments_replicas: deployment {} has {} replicas", name, replicas);
+                    map.insert(name.clone(), replicas);
+                }
+                Err(e) => {
+                    tracing::warn!("read_deployments_replicas: failed to read deployment {}: {}", name, e);
+                    map.insert(name.clone(), 1);
+                }
+            }
+        }
+        map
+    }
+
+    async fn scale_deployments(&self, names: &[String], ns: &str, replicas: i64) {
+        for name in names {
+            let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, name);
+            if let Err(e) = self.request("PATCH", &url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
+                tracing::warn!("scale_deployments: failed to scale deployment {} to {}: {}", name, replicas, e);
+            } else {
+                tracing::info!("scale_deployments: deployment {} scaled to {}", name, replicas);
+            }
+        }
     }
 
     pub async fn check_rbac(&self) {
@@ -683,28 +740,11 @@ impl Kubectl {
             tracing::info!("trigger_restore HelmRelease suspended for app={}", base_app);
         }
 
-        // Scale deployment to 0 — but first read the original replica count so we can restore it
-        let deploy_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, base_app);
-        let original_replicas: Option<i64> = match self.request("GET", &deploy_url, None).await {
-            Ok(deploy) => {
-                let replicas = deploy.get("spec")
-                    .and_then(|s| s.get("replicas"))
-                    .and_then(|r| r.as_i64());
-                tracing::debug!("trigger_restore read deployment {} with replicas={:?}", base_app, replicas);
-                replicas
-            }
-            Err(e) => {
-                tracing::warn!("trigger_restore Deployment read failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
-                None
-            }
-        };
-
-        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, base_app);
-        if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": 0 } }))).await {
-            tracing::warn!("trigger_restore Deployment scale-down failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
-        } else {
-            tracing::info!("trigger_restore deployment scaled to 0 for app={}", base_app);
-        }
+        // Find all deployments belonging to this app via label selector,
+        // read original replica counts, then scale all to 0
+        let deploys = self.find_app_deployments(&base_app, ns).await;
+        let replica_map = self.read_deployments_replicas(&deploys, ns).await;
+        self.scale_deployments(&deploys, ns, 0).await;
 
         let dst_name = self.dest_crd_name(app);
         let dst_url = format!(
@@ -737,7 +777,7 @@ impl Kubectl {
         tracing::debug!("trigger_restore PATCHing ReplicationDestination restoreAsOf");
         if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
             tracing::error!("trigger_restore failed to patch ReplicationDestination, rolling back: {}", e);
-            self.resume_restore(app, ns, original_replicas).await;
+            self.resume_restore(app, ns, &replica_map).await;
             return Err(KubeError::Api(format!("Failed to patch ReplicationDestination: {}", e)));
         }
 
@@ -749,7 +789,7 @@ impl Kubectl {
             "status": { "lastManualSync": serde_json::Value::Null }
         }))).await {
             tracing::error!("trigger_restore failed to patch RD status, rolling back: {}", e);
-            self.resume_restore(app, ns, original_replicas).await;
+            self.resume_restore(app, ns, &replica_map).await;
             return Err(KubeError::Api(format!("Failed to patch ReplicationDestination status: {}", e)));
         }
         tracing::info!("trigger_restore status.lastManualSync reset, waiting for VolSync to process");
@@ -764,7 +804,7 @@ impl Kubectl {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(restore_timeout) {
                 tracing::warn!("trigger_restore polling timed out after {} polls for app={}", poll_count, app);
-                self.resume_restore(app, ns, original_replicas).await;
+                self.resume_restore(app, ns, &replica_map).await;
                 return Err(KubeError::Timeout("Restore polling timed out".to_string()));
             }
             sleep(Duration::from_secs(poll_interval)).await;
@@ -786,7 +826,7 @@ impl Kubectl {
                     if finished {
                         tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
                         // Resume deployment and HelmRelease — no trigger cleanup needed
-                        self.resume_restore(app, ns, original_replicas).await;
+                        self.resume_restore(app, ns, &replica_map).await;
                         return Ok(RestoreResponse {
                             trigger: flux_trigger,
                             status: "completed".to_string(),
@@ -794,7 +834,7 @@ impl Kubectl {
                         });
                     } else {
                         tracing::warn!("trigger_restore failed on poll #{} for app={}: result={:?}", poll_count, app, result);
-                        self.resume_restore(app, ns, original_replicas).await;
+                        self.resume_restore(app, ns, &replica_map).await;
                         return Err(KubeError::SnapshotFailed(format!(
                             "Restore failed with result: {:?}", result
                         )));
@@ -808,19 +848,20 @@ impl Kubectl {
         }
     }
 
-    /// Resume the deployment and HelmRelease to their original state after restore completes (success or failure)
-    async fn resume_restore(&self, app: &str, ns: &str, original_replicas: Option<i64>) {
-        tracing::debug!("resume_restore called for app={} replicas={:?}", app, original_replicas);
-        let base_app = self.app_base_name(app);
+    /// Resume the deployments and HelmRelease to their original state after restore completes (success or failure)
+    async fn resume_restore(&self, app: &str, ns: &str, replica_map: &HashMap<String, i64>) {
+        tracing::debug!("resume_restore called for app={} with {} deployments to restore", app, replica_map.len());
 
-        let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, base_app);
-        let replicas = original_replicas.unwrap_or(1);
-        if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
-            tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", base_app, replicas, e);
-        } else {
-            tracing::info!("resume_restore scaled deployment {} back to {} replicas", base_app, replicas);
+        for (name, replicas) in replica_map {
+            let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, name);
+            if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
+                tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", name, replicas, e);
+            } else {
+                tracing::info!("resume_restore scaled deployment {} back to {} replicas", name, replicas);
+            }
         }
 
+        let base_app = self.app_base_name(app);
         let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, base_app);
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
             tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", base_app, e);

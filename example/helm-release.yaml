@@ -61,7 +61,7 @@ spec:
           app:
             image:
               repository: ghcr.io/niki-on-github/volsync-webui
-              tag: "v0.1.0"
+              tag: "v0.1.1"
             env:
               VOLSYNC_API_GROUP: "volsync.backube"
               VOLSYNC_SOURCE_SUFFIX: "-backup"
