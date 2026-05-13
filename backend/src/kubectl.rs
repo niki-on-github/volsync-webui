@@ -1,11 +1,10 @@
-use crate::models::{App, AppBackupStatus, BackupResponse, RestoreResponse, Snapshot};
+use crate::models::{App, BackupAllResponse, BackupResponse, BackupSummary, RestoreResponse, Snapshot, TaskStatus};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 // Configurable timeouts via environment variables (all in seconds)
@@ -68,6 +67,7 @@ pub struct Kubectl {
     source_suffix: String,
     dest_suffix: String,
     token: Option<String>,
+    pub tasks: Arc<RwLock<HashMap<String, TaskStatus>>>,
 }
 
 impl Kubectl {
@@ -149,7 +149,7 @@ impl Kubectl {
             })
         };
 
-        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, token })
+        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, token, tasks: Arc::new(RwLock::new(HashMap::new())) })
     }
 
     fn dest_crd_name(&self, app: &str) -> String {
@@ -362,7 +362,7 @@ impl Kubectl {
 
         tracing::debug!("list_apps received {} ReplicationSources from API", items.len());
 
-        let apps: Vec<App> = items.iter().filter_map(|item| {
+        let mut apps: Vec<App> = items.iter().filter_map(|item| {
             let name = item.get("metadata")?.get("name")?.as_str()?.to_string();
             let namespace_item = item.get("metadata")?.get("namespace")?.as_str()?.to_string();
             let status = item.get("status");
@@ -417,8 +417,28 @@ impl Kubectl {
                 in_progress,
                 paused,
                 repository,
+                backup_pending: false,
+                restore_pending: false,
             })
         }).collect();
+
+        // Cross-reference with active background tasks
+        let tasks = self.tasks.read().await;
+        for app in &mut apps {
+            let bk = format!("{}/{}/backup", app.namespace, app.name);
+            if let Some(t) = tasks.get(&bk) {
+                if t.status == "pending" || t.status == "running" {
+                    app.backup_pending = true;
+                }
+            }
+            let rk = format!("{}/{}/restore", app.namespace, app.name);
+            if let Some(t) = tasks.get(&rk) {
+                if t.status == "pending" || t.status == "running" {
+                    app.restore_pending = true;
+                }
+            }
+        }
+        drop(tasks);
 
         tracing::debug!("list_apps returning {} apps", apps.len());
         Ok(apps)
@@ -531,70 +551,151 @@ impl Kubectl {
         }
     }
 
-    pub async fn trigger_backup_all(&self, trigger: &str) -> Result<Vec<AppBackupStatus>, KubeError> {
+    pub async fn trigger_backup_all(self: Arc<Self>, trigger: &str) -> Result<BackupAllResponse, KubeError> {
         let apps = self.list_apps().await?;
-        let kubectl = self.clone();
+        let trigger_owned = trigger.to_string();
+        let mut triggered = 0u32;
+        let mut failed = 0u32;
 
-        // Concurrency limit to prevent overwhelming the K8s API server (Bug #7 fix)
-        let max_concurrent: usize = std::env::var("BACKUP_ALL_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5);
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
-        tracing::info!("Starting backup-all for {} apps with max {} concurrent tasks", apps.len(), max_concurrent);
-
-        // Run backups concurrently with a semaphore to limit concurrency
-        let handles: Vec<JoinHandle<AppBackupStatus>> = apps.into_iter().map(|app| {
-            let app_name = app.name.clone();
-            let app_ns = app.namespace.clone();
-            let kubectl_clone = kubectl.clone();
-            let trigger_owned = trigger.to_string();
-            let sem = semaphore.clone();
-            tokio::spawn(async move {
-                // Acquire semaphore permit before starting backup
-                let _permit = match sem.acquire().await {
-                    Ok(p) => p,
-                    Err(e) => return AppBackupStatus {
-                        app: app_name.clone(),
-                        namespace: app_ns.clone(),
-                        success: false,
-                        error: Some(format!("Semaphore error: {}", e)),
-                    },
-                };
-                match kubectl_clone.trigger_backup(&app_name, &app_ns, &trigger_owned).await {
-                    Ok(r) => {
-                        let success = is_successful(&r.result);
-                        AppBackupStatus {
-                            app: app_name,
-                            namespace: app_ns,
-                            success,
-                            error: if success { None } else { r.result },
-                        }
-                    },
-                    Err(e) => AppBackupStatus {
-                        app: app_name,
-                        namespace: app_ns,
-                        success: false,
-                        error: Some(e.to_string()),
-                    },
+        for app in &apps {
+            match self.clone().spawn_backup(app.name.clone(), app.namespace.clone(), trigger_owned.clone()).await {
+                Ok(_) => triggered += 1,
+                Err(e) => {
+                    tracing::warn!("Failed to spawn backup for {}: {}", app.name, e);
+                    failed += 1;
                 }
-            })
-        }).collect();
-
-        // Await all concurrent tasks
-        let mut results = Vec::new();
-        for handle in handles {
-            match handle.await {
-                Ok(status) => results.push(status),
-                Err(e) => results.push(AppBackupStatus {
-                    app: "unknown".to_string(),
-                    namespace: "".to_string(),
-                    success: false,
-                    error: Some(format!("Task panicked: {}", e)),
-                }),
             }
         }
-        Ok(results)
+
+        Ok(BackupAllResponse {
+            trigger: trigger.to_string(),
+            apps: vec![],
+            summary: Some(BackupSummary {
+                total: apps.len(),
+                success: triggered as usize,
+                failed: failed as usize,
+            }),
+        })
+    }
+
+    pub async fn spawn_backup(self: Arc<Self>, app: String, ns: String, trigger: String) -> Result<TaskStatus, KubeError> {
+        let task_key = format!("{}/{}/backup", ns, app);
+
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(existing) = tasks.get(&task_key) {
+                if existing.status == "pending" || existing.status == "running" {
+                    return Err(KubeError::Api(format!("Backup already in progress for {}", app)));
+                }
+            }
+            tasks.remove(&task_key);
+        }
+
+        let task = TaskStatus {
+            task_type: "backup".to_string(),
+            app: app.clone(),
+            namespace: ns.clone(),
+            status: "pending".to_string(),
+            result: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+        {
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(task_key.clone(), task.clone());
+        }
+
+        let me = self.clone();
+        tokio::spawn(async move {
+            {
+                let mut tasks = me.tasks.write().await;
+                if let Some(t) = tasks.get_mut(&task_key) {
+                    t.status = "running".to_string();
+                }
+            }
+
+            match me.trigger_backup(&app, &ns, &trigger).await {
+                Ok(resp) => {
+                    let mut tasks = me.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_key) {
+                        t.status = "completed".to_string();
+                        t.result = resp.result;
+                    }
+                }
+                Err(e) => {
+                    let mut tasks = me.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_key) {
+                        t.status = "failed".to_string();
+                        t.error = Some(e.to_string());
+                    }
+                }
+            }
+        });
+
+        Ok(task)
+    }
+
+    pub async fn spawn_restore(self: Arc<Self>, app: String, ns: String, trigger: String, timestamp: Option<String>) -> Result<TaskStatus, KubeError> {
+        let task_key = format!("{}/{}/restore", ns, app);
+
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(existing) = tasks.get(&task_key) {
+                if existing.status == "pending" || existing.status == "running" {
+                    return Err(KubeError::Api(format!("Restore already in progress for {}", app)));
+                }
+            }
+            tasks.remove(&task_key);
+        }
+
+        let task = TaskStatus {
+            task_type: "restore".to_string(),
+            app: app.clone(),
+            namespace: ns.clone(),
+            status: "pending".to_string(),
+            result: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+        {
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(task_key.clone(), task.clone());
+        }
+
+        let me = self.clone();
+        tokio::spawn(async move {
+            {
+                let mut tasks = me.tasks.write().await;
+                if let Some(t) = tasks.get_mut(&task_key) {
+                    t.status = "running".to_string();
+                }
+            }
+
+            match me.trigger_restore(&app, &ns, &trigger, timestamp.as_deref()).await {
+                Ok(resp) => {
+                    let mut tasks = me.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_key) {
+                        t.status = "completed".to_string();
+                        t.result = resp.result;
+                    }
+                }
+                Err(e) => {
+                    let mut tasks = me.tasks.write().await;
+                    if let Some(t) = tasks.get_mut(&task_key) {
+                        t.status = "failed".to_string();
+                        t.error = Some(e.to_string());
+                    }
+                }
+            }
+        });
+
+        Ok(task)
+    }
+
+    pub async fn task_status(&self, app: &str, ns: &str, task_type: &str) -> Option<TaskStatus> {
+        let key = format!("{}/{}/{}", ns, app, task_type);
+        let tasks = self.tasks.read().await;
+        tasks.get(&key).cloned()
     }
 
     pub async fn get_snapshots(&self, app: &str, ns: &str) -> Result<Vec<Snapshot>, KubeError> {
@@ -871,10 +972,6 @@ impl Kubectl {
     }
 }
 
-fn is_successful(result: &Option<String>) -> bool {
-    result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"))
-}
-
 fn parse_snapshots(logs: &str) -> Result<Vec<Snapshot>, KubeError> {
     let parse_object = |snap: &Value| -> Option<Snapshot> {
         let id = snap.get("id")?.as_str()?;
@@ -900,6 +997,7 @@ fn parse_snapshots(logs: &str) -> Result<Vec<Snapshot>, KubeError> {
             files_unmodified: summary.and_then(|s| s.get("files_unmodified")).and_then(|v| v.as_i64()).unwrap_or(0),
             data_added: summary.and_then(|s| s.get("data_added")).and_then(|v| v.as_i64()).unwrap_or(0),
             total_files_processed: summary.and_then(|s| s.get("total_files_processed")).and_then(|v| v.as_i64()).unwrap_or(0),
+            total_bytes_processed: summary.and_then(|s| s.get("total_bytes_processed")).and_then(|v| v.as_i64()).unwrap_or(0),
         })
     };
 

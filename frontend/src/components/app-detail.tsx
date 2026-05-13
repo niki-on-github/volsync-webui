@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/api";
 import type { App, Snapshot } from "@/types";
 import { formatDateTime } from "@/lib/utils";
@@ -68,7 +68,15 @@ function AppHeader({ app }: { app: App }) {
       </div>
       <div className="flex items-center gap-2">
         {app.paused && <Badge variant="outline">Paused</Badge>}
-        {app.in_progress ? (
+        {app.restore_pending ? (
+          <Badge variant="secondary">
+            <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> Restoring
+          </Badge>
+        ) : app.backup_pending ? (
+          <Badge variant="secondary">
+            <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> Backing up
+          </Badge>
+        ) : app.in_progress ? (
           <Badge variant="secondary">
             <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> Running
           </Badge>
@@ -95,9 +103,82 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const [destRepo, setDestRepo] = useState<string | null>(null);
   const [destLoaded, setDestLoaded] = useState(false);
 
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const selectedSnap = timestamp && timestamp !== "__latest__"
     ? snapshots.find(s => s.time === timestamp)
     : null;
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback((taskType: "backup" | "restore") => {
+    stopPolling();
+    const poll = async () => {
+      const fn = taskType === "backup" ? api.getBackupStatus : api.getRestoreStatus;
+      const status = await fn(app.name, app.namespace);
+      if (!status) {
+        if (taskType === "backup") { setBackingUp(false); setBackupStatus(null); }
+        else { setRestoring(false); setRestoreStatus(null); }
+        stopPolling();
+        return;
+      }
+      if (status.status === "completed") {
+        stopPolling();
+        if (taskType === "backup") {
+          setBackingUp(false);
+          setBackupStatus(status.result ? `Backup completed: ${status.result}` : "Backup completed");
+          onBackupComplete();
+        } else {
+          setRestoring(false);
+          setRestoreStatus(status.result ? `Restore completed: ${status.result}` : "Restore completed");
+          onBackupComplete();
+        }
+        return;
+      }
+      if (status.status === "failed") {
+        stopPolling();
+        const msg = status.error ?? "unknown error";
+        if (taskType === "backup") {
+          setBackingUp(false);
+          setBackupStatus(`Backup failed: ${msg}`);
+        } else {
+          setRestoring(false);
+          setRestoreStatus(`Restore failed: ${msg}`);
+        }
+        return;
+      }
+      const started = new Date(status.started_at).toLocaleTimeString();
+      if (taskType === "backup") {
+        setBackupStatus(`Backing up... (since ${started})`);
+      } else {
+        setRestoreStatus(`Restoring... (since ${started})`);
+      }
+    };
+    poll();
+    pollRef.current = setInterval(poll, 2000);
+  }, [app.name, app.namespace, stopPolling, onBackupComplete]);
+
+  // Resume polling if re-mounting with active tasks
+  useEffect(() => {
+    if (app.backup_pending) {
+      setBackingUp(true);
+      startPolling("backup");
+    } else if (app.restore_pending) {
+      setRestoring(true);
+      startPolling("restore");
+    }
+    return stopPolling;
+  }, [app.name, app.namespace, app.backup_pending, app.restore_pending, startPolling, stopPolling]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return stopPolling;
+  }, [stopPolling]);
 
   useEffect(() => {
     setTimestamp("");
@@ -121,7 +202,6 @@ export function AppDetail({ app, onBackupComplete }: Props) {
     return () => { cancelled = true; };
   }, [app.name, app.namespace]);
 
-  // Lazy-fetch destination repository
   useEffect(() => {
     let cancelled = false;
     setDestRepo(null);
@@ -136,41 +216,39 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   }, [app.name, app.namespace]);
 
   const handleBackup = async () => {
-    if (backingUp) return;
+    if (backingUp || app.backup_pending) return;
     setBackingUp(true);
     setBackupStatus("Starting backup...");
     try {
-      const r = await api.triggerBackup(app.name, app.namespace);
-      const ok = r.result?.toLowerCase() === "successful";
-      setBackupStatus(ok ? "Backup completed successfully" : `Backup failed: ${r.result ?? "unknown"}`);
-      onBackupComplete();
+      await api.triggerBackup(app.name, app.namespace);
+      startPolling("backup");
     } catch (e) {
-      setBackupStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
       setBackingUp(false);
+      setBackupStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const handleRestore = async () => {
-    if (restoring) return;
+    if (restoring || app.restore_pending) return;
     setRestoring(true);
     setRestoreStatus("Starting restore...");
     const trigger = `restore-${Date.now()}`;
     try {
-      const r = await api.triggerRestore(
+      await api.triggerRestore(
         app.name,
         app.namespace,
         trigger,
         timestamp === "__latest__" ? undefined : timestamp,
       );
-      const ok = r.result?.toLowerCase() === "successful";
-      setRestoreStatus(ok ? "Restore completed successfully" : `Restore result: ${r.result ?? "unknown"}`);
+      startPolling("restore");
     } catch (e) {
-      setRestoreStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
       setRestoring(false);
+      setRestoreStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
+
+  const backupLocked = backingUp || app.backup_pending;
+  const restoreLocked = restoring || app.restore_pending || app.backup_pending;
 
   return (
     <Card>
@@ -218,9 +296,9 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             <div className="font-mono text-xs">{app.repository ?? "-"}</div>
           </div>
           <div className="flex items-center gap-3">
-            <Button onClick={handleBackup} disabled={backingUp} size="sm">
+            <Button onClick={handleBackup} disabled={backupLocked} size="sm">
               <Play className="mr-1 h-4 w-4" />
-              {backingUp ? "Backing up..." : "Backup Now"}
+              {backupLocked ? "Backing up..." : "Backup Now"}
             </Button>
             {backupStatus && (
               <span className="text-sm text-muted-foreground">{backupStatus}</span>
@@ -246,7 +324,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                     <TableHead>ID</TableHead>
                     <TableHead>Time</TableHead>
                     <TableHead>Files</TableHead>
-                    <TableHead>Data</TableHead>
+                    <TableHead>Size</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -263,10 +341,12 @@ export function AppDetail({ app, onBackupComplete }: Props) {
                         <span className="text-muted-foreground ml-1">({snap.total_files_processed})</span>
                       </TableCell>
                       <TableCell className="text-xs font-mono">
-                        {snap.data_added > 0
-                          ? snap.data_added > 1_000_000
-                            ? `${(snap.data_added / 1_000_000).toFixed(1)}MB`
-                            : `${(snap.data_added / 1_000).toFixed(0)}KB`
+                        {snap.total_bytes_processed > 0
+                          ? snap.total_bytes_processed > 1_000_000_000
+                            ? `${(snap.total_bytes_processed / 1_000_000_000).toFixed(2)}GB`
+                            : snap.total_bytes_processed > 1_000_000
+                              ? `${(snap.total_bytes_processed / 1_000_000).toFixed(1)}MB`
+                              : `${(snap.total_bytes_processed / 1_000).toFixed(0)}KB`
                           : "-"}
                       </TableCell>
                     </TableRow>
@@ -304,12 +384,12 @@ export function AppDetail({ app, onBackupComplete }: Props) {
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button
-                  disabled={restoring || !timestamp}
+                  disabled={restoreLocked || !timestamp}
                   size="sm"
                   variant="destructive"
                 >
                   <RotateCcw className="mr-1 h-4 w-4" />
-                  {restoring ? "Restoring..." : "Restore"}
+                  {restoreLocked ? "Restoring..." : "Restore"}
                 </Button>
               </AlertDialogTrigger>
               <AlertDialogContent>

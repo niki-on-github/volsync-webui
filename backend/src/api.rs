@@ -80,55 +80,51 @@ pub async fn get_snapshots(
 pub async fn trigger_backup(
     Path((app, ns)): Path<(String, String)>,
     State(kubectl): State<AppState>,
-) -> Result<Json<BackupResponse>, ApiError> {
+) -> Result<Json<TaskStatus>, ApiError> {
     tracing::info!("trigger_backup called for app={} namespace={}", app, ns);
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup using trigger ID: {}", trigger);
-    let resp = kubectl.trigger_backup(&app, &ns, &trigger).await.map_err(|e| {
-        tracing::error!("trigger_backup failed for app={} ns={}: {}", app, ns, e);
+    let app_clone = app.clone();
+    let ns_clone = ns.clone();
+    let task = kubectl.spawn_backup(app, ns, trigger).await.map_err(|e| {
+        tracing::error!("trigger_backup failed for app={} ns={}: {}", app_clone, ns_clone, e);
         ApiError::from(e)
     })?;
-    tracing::info!("trigger_backup completed for app={} status={}", app, resp.status);
-    Ok(Json(resp))
+    tracing::info!("trigger_backup spawned for app={}", task.app);
+    Ok(Json(task))
 }
 
 pub async fn trigger_backup_all(State(kubectl): State<AppState>) -> Result<Json<BackupAllResponse>, ApiError> {
     tracing::info!("trigger_backup_all called");
     let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
     tracing::debug!("trigger_backup_all using trigger ID: {}", trigger);
-    let apps = kubectl.trigger_backup_all(&trigger).await.map_err(|e| {
+    let resp = kubectl.trigger_backup_all(&trigger).await.map_err(|e| {
         tracing::error!("trigger_backup_all failed: {}", e);
         ApiError::from(e)
     })?;
 
-    let total = apps.len();
-    let success = apps.iter().filter(|a| a.success).count();
-    let failed = total - success;
+    let total = resp.summary.as_ref().map(|s| s.total).unwrap_or(0);
+    let success = resp.summary.as_ref().map(|s| s.success).unwrap_or(0);
+    let failed = resp.summary.as_ref().map(|s| s.failed).unwrap_or(0);
     tracing::info!("trigger_backup_all completed: {}/{} succeeded, {} failed", success, total, failed);
 
-    Ok(Json(BackupAllResponse {
-        trigger,
-        apps,
-        summary: Some(BackupSummary {
-            total,
-            success,
-            failed,
-        }),
-    }))
+    Ok(Json(resp))
 }
 
 pub async fn trigger_restore(
     Path((app, ns)): Path<(String, String)>,
     State(kubectl): State<AppState>,
     Json(req): Json<RestoreRequest>,
-) -> Result<Json<RestoreResponse>, ApiError> {
-    let resp = kubectl.trigger_restore(&app, &ns, &req.trigger, req.timestamp.as_deref())
+) -> Result<Json<TaskStatus>, ApiError> {
+    let app_clone = app.clone();
+    let ns_clone = ns.clone();
+    let task = kubectl.spawn_restore(app, ns, req.trigger, req.timestamp)
         .await
         .map_err(|e| {
-            tracing::error!("trigger_restore failed for app={} ns={}: {}", app, ns, e);
+            tracing::error!("trigger_restore failed for app={} ns={}: {}", app_clone, ns_clone, e);
             ApiError::from(e)
         })?;
-    Ok(Json(resp))
+    Ok(Json(task))
 }
 
 pub async fn get_dest_repository(
@@ -140,6 +136,20 @@ pub async fn get_dest_repository(
         ApiError::from(e)
     })?;
     Ok(Json(repo))
+}
+
+pub async fn get_backup_status(
+    Path((app, ns)): Path<(String, String)>,
+    State(kubectl): State<AppState>,
+) -> Result<Json<Option<TaskStatus>>, ApiError> {
+    Ok(Json(kubectl.task_status(&app, &ns, "backup").await))
+}
+
+pub async fn get_restore_status(
+    Path((app, ns)): Path<(String, String)>,
+    State(kubectl): State<AppState>,
+) -> Result<Json<Option<TaskStatus>>, ApiError> {
+    Ok(Json(kubectl.task_status(&app, &ns, "restore").await))
 }
 
 pub async fn get_config() -> Json<AppConfig> {

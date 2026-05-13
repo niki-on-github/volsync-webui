@@ -11,6 +11,19 @@ pub struct App {
     pub in_progress: bool,
     pub paused: bool,
     pub repository: Option<String>,
+    pub backup_pending: bool,
+    pub restore_pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskStatus {
+    pub task_type: String,
+    pub app: String,
+    pub namespace: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +39,7 @@ pub struct Snapshot {
     pub files_unmodified: i64,
     pub data_added: i64,
     pub total_files_processed: i64,
+    pub total_bytes_processed: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

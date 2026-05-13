@@ -1,4 +1,4 @@
-import type { App, AppConfig, BackupAllResponse, BackupResponse, RestoreResponse, Snapshot } from "./types";
+import type { App, AppConfig, BackupAllResponse, TaskStatus, Snapshot } from "./types";
 
 const BASE = typeof window !== "undefined" ? window.location.origin : "http://localhost:8080";
 
@@ -44,9 +44,9 @@ export const api = {
     }
   },
 
-  async triggerBackup(app: string, ns: string): Promise<BackupResponse> {
+  async triggerBackup(app: string, ns: string): Promise<TaskStatus> {
     try {
-      return await fetchJson<BackupResponse>(
+      return await fetchJson<TaskStatus>(
         `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/backup`,
         { method: "POST" },
       );
@@ -65,6 +65,26 @@ export const api = {
     }
   },
 
+  async getBackupStatus(app: string, ns: string): Promise<TaskStatus | null> {
+    try {
+      return await fetchJson<TaskStatus | null>(
+        `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/backup/status`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async getRestoreStatus(app: string, ns: string): Promise<TaskStatus | null> {
+    try {
+      return await fetchJson<TaskStatus | null>(
+        `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/restore/status`,
+      );
+    } catch {
+      return null;
+    }
+  },
+
   async getDestRepository(app: string, ns: string): Promise<string | null> {
     try {
       return await fetchJson<string | null>(
@@ -80,9 +100,9 @@ export const api = {
     ns: string,
     trigger: string,
     timestamp?: string,
-  ): Promise<RestoreResponse> {
+  ): Promise<TaskStatus> {
     try {
-      return await fetchJson<RestoreResponse>(
+      return await fetchJson<TaskStatus>(
         `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/restore`,
         {
           method: "POST",

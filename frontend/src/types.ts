@@ -8,6 +8,18 @@ export interface App {
   in_progress: boolean;
   paused: boolean;
   repository: string | null;
+  backup_pending: boolean;
+  restore_pending: boolean;
+}
+
+export interface TaskStatus {
+  task_type: "backup" | "restore";
+  app: string;
+  namespace: string;
+  status: "pending" | "running" | "completed" | "failed";
+  result: string | null;
+  error: string | null;
+  started_at: string;
 }
 
 export interface Snapshot {
@@ -22,6 +34,7 @@ export interface Snapshot {
   files_unmodified: number;
   data_added: number;
   total_files_processed: number;
+  total_bytes_processed: number;
 }
 
 export interface BackupResponse {
