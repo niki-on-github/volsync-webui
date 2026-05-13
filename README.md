@@ -178,16 +178,19 @@ The PVC name must follow the convention: `{base_app_name}{VOLSYNC_PVC_SUFFIX}` (
  0. Check HelmRelease exists (REQUIRED)               ← fail if missing
  0.5 Suspend Flux Kustomization (best-effort)          ← pauses GitOps reconciliation
  1. Suspend HelmRelease                                ← prevents Flux from reverting changes
- 2. Scale down deployments to 0                        ← detach app from PVC
+ 2. Scale down ALL deployments to 0                    ← detach app from PVC (multi-deployment safe)
  3. Save original RD fields:                           ← copyMethod, destinationPVC, restoreAsOf
  4. PATCH RD: copyMethod=Direct, destinationPVC=<pvc>  ← VolSync writes directly into app PVC
  5. PATCH RD: restoreAsOf=<timestamp> (if provided)
  6. Nullify status.lastManualSync                      ← triggers VolSync restore
  7. Poll until restore completes
  8. PATCH RD revert: restore original values           ← reverts copyMethod, destinationPVC, restoreAsOf
- 9. Unsuspend HelmRelease                              ← Flux scales app back up
-10. Unsuspend Kustomization (best-effort)              ← resumes GitOps reconciliation
+ 9. Scale ALL deployments back to original replicas    ← pre-scales before Flux wakes up
+10. Unsuspend HelmRelease                              ← Flux sees no drift
+11. Unsuspend Kustomization (best-effort)              ← resumes GitOps reconciliation
 ```
+
+The restore supports **multiple deployments per app** — all deployments matching `app.kubernetes.io/instance={base_app}` are scaled down and restored independently with their original replica counts.
 
 ### Storage Backend Compatibility
 

@@ -262,6 +262,28 @@ impl Kubectl {
         }
     }
 
+    async fn read_deployments_replicas(&self, names: &[String], ns: &str) -> HashMap<String, i64> {
+        let mut map = HashMap::new();
+        for name in names {
+            let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}", ns, name);
+            match self.request("GET", &url, None).await {
+                Ok(deploy) => {
+                    let replicas = deploy.get("spec")
+                        .and_then(|s| s.get("replicas"))
+                        .and_then(|r| r.as_i64())
+                        .unwrap_or(1);
+                    tracing::debug!("read_deployments_replicas: deployment {} has {} replicas", name, replicas);
+                    map.insert(name.clone(), replicas);
+                }
+                Err(e) => {
+                    tracing::warn!("read_deployments_replicas: failed to read deployment {}: {}", name, e);
+                    map.insert(name.clone(), 1);
+                }
+            }
+        }
+        map
+    }
+
     async fn scale_deployments(&self, names: &[String], ns: &str, replicas: i64) {
         for name in names {
             let url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, name);
@@ -945,6 +967,7 @@ impl Kubectl {
 
         // Step 2: Scale down deployments to 0 (detach app from PVC)
         let deploys = self.find_app_deployments(&base_app, ns).await;
+        let replica_map = self.read_deployments_replicas(&deploys, ns).await;
         self.scale_deployments(&deploys, ns, 0).await;
 
         // Step 3: Read current RD, save original copyMethod, destinationPVC, restoreAsOf
@@ -1105,7 +1128,34 @@ impl Kubectl {
                             );
                         }
 
-                        // Step 8: Unsuspend HelmRelease — Flux scales up
+                        // Step 8: Scale deployments back to original replicas (before unsuspending,
+                        //         so Flux sees no drift and recovery is instant)
+                        for (name, replicas) in &replica_map {
+                            let scale_url = format!(
+                                "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
+                                ns, name
+                            );
+                            if let Err(e) = self
+                                .request(
+                                    "PATCH",
+                                    &scale_url,
+                                    Some(serde_json::json!({ "spec": { "replicas": replicas } })),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to scale deployment {} back to {} (continuing): {}",
+                                    name, replicas, e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "Deployment {} scaled back to {} replicas",
+                                    name, replicas
+                                );
+                            }
+                        }
+
+                        // Step 9: Unsuspend HelmRelease — Flux sees no drift
                         if let Err(e) = self
                             .request(
                                 "PATCH",
