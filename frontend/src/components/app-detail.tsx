@@ -242,12 +242,10 @@ export function AppDetail({ app, onBackupComplete }: Props) {
     if (restoring || app.restore_pending) return;
     setRestoring(true);
     setRestoreStatus("Starting restore...");
-    const trigger = `restore-${Date.now()}`;
     try {
       await api.triggerRestore(
         app.name,
         app.namespace,
-        trigger,
         timestamp === "__latest__" ? undefined : timestamp,
       );
       startPolling("restore");

@@ -101,7 +101,7 @@ pub async fn trigger_restore(
 ) -> Result<Json<TaskStatus>, ApiError> {
     let app_clone = app.clone();
     let ns_clone = ns.clone();
-    let task = kubectl.spawn_restore(app, ns, req.trigger, req.timestamp)
+    let task = kubectl.spawn_restore(app, ns, req.timestamp)
         .await
         .map_err(|e| {
             tracing::error!("trigger_restore failed for app={} ns={}: {}", app_clone, ns_clone, e);

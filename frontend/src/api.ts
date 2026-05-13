@@ -90,7 +90,6 @@ export const api = {
   async triggerRestore(
     app: string,
     ns: string,
-    trigger: string,
     timestamp?: string,
   ): Promise<TaskStatus> {
     try {
@@ -98,7 +97,7 @@ export const api = {
         `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/restore`,
         {
           method: "POST",
-          body: JSON.stringify({ trigger, timestamp: timestamp ?? null }),
+          body: JSON.stringify({ timestamp: timestamp ?? null }),
         },
       );
     } catch (e) {

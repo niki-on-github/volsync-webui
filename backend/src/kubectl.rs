@@ -634,7 +634,7 @@ impl Kubectl {
         Ok(task)
     }
 
-    pub async fn spawn_restore(self: Arc<Self>, app: String, ns: String, trigger: String, timestamp: Option<String>) -> Result<TaskStatus, KubeError> {
+    pub async fn spawn_restore(self: Arc<Self>, app: String, ns: String, timestamp: Option<String>) -> Result<TaskStatus, KubeError> {
         let task_key = format!("{}/{}/restore", ns, app);
         let backup_key = format!("{}/{}/backup", ns, app);
 
@@ -676,7 +676,7 @@ impl Kubectl {
                 }
             }
 
-            match me.trigger_restore(&app, &ns, &trigger, timestamp.as_deref()).await {
+            match me.trigger_restore(&app, &ns, timestamp.as_deref()).await {
                 Ok(resp) => {
                     let mut tasks = me.tasks.write().await;
                     if let Some(t) = tasks.get_mut(&task_key) {
@@ -734,7 +734,7 @@ impl Kubectl {
         let secret_name = rs
             .get("spec")
             .and_then(|s| s.get("restic"))
-            .and_then(|r| r.get("repository"))
+            .and_then(|r| r.get("repository")) // spec.restic.repository in VolSync's ReplicationSource CRD IS the secret name, not a URL
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 KubeError::Api(format!(
@@ -839,7 +839,7 @@ impl Kubectl {
         }
     }
 
-    pub async fn trigger_restore(&self, app: &str, ns: &str, _trigger: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
+    pub async fn trigger_restore(&self, app: &str, ns: &str, timestamp: Option<&str>) -> Result<RestoreResponse, KubeError> {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
         let base_app = self.app_base_name(app);
 
@@ -862,15 +862,21 @@ impl Kubectl {
             self.api_group, ns, dst_name
         );
 
-        // Read current spec.trigger.manual — this is the value Flux maintains as the desired state
+        // Read current spec.trigger.manual — this is what Flux maintains as the desired state.
+        // If unset (non-Flux app), generate one so the poll loop has something to match.
         let current_rd: Value = self.request("GET", &dst_url, None).await?;
-        let flux_trigger = current_rd.get("spec")
+        let mut flux_trigger = current_rd.get("spec")
             .and_then(|s| s.get("trigger"))
             .and_then(|t| t.get("manual"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        tracing::debug!("trigger_restore current spec.trigger.manual='{}'", flux_trigger);
+        let generated_trigger = flux_trigger.is_empty();
+        if generated_trigger {
+            flux_trigger = format!("restore-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+            tracing::info!("trigger_restore generated new trigger for non-Flux app: {}", flux_trigger);
+        }
+        tracing::debug!("trigger_restore using spec.trigger.manual='{}'", flux_trigger);
 
         let mut restic_spec = serde_json::json!({});
         if let Some(ts) = timestamp {
@@ -879,12 +885,14 @@ impl Kubectl {
             }
         }
 
-        // PATCH only restoreAsOf — never touch spec.trigger.manual (Flux owns it)
-        let dst_patch = serde_json::json!({
+        let mut dst_patch = serde_json::json!({
             "spec": { "restic": restic_spec }
         });
+        if generated_trigger {
+            dst_patch["spec"]["trigger"] = serde_json::json!({ "manual": &flux_trigger });
+        }
 
-        tracing::debug!("trigger_restore PATCHing ReplicationDestination restoreAsOf");
+        tracing::debug!("trigger_restore PATCHing ReplicationDestination");
         if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
             tracing::error!("trigger_restore failed to patch ReplicationDestination, rolling back: {}", e);
             self.resume_restore(app, ns, &replica_map).await;

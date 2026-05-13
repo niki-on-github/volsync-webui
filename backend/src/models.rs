@@ -51,7 +51,6 @@ pub struct BackupResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreRequest {
-    pub trigger: String,
     pub timestamp: Option<String>,
 }
 
