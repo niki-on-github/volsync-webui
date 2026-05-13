@@ -1,0 +1,11 @@
+target/
+node_modules/
+.git/
+dist/
+*.wasm
+*.tsbuildinfo
+.next/
+.env
+.env.*
+*.log
+.DS_Store

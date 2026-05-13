@@ -1,0 +1,23 @@
+[package]
+name = "volsync-webui-backend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+tower-http.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

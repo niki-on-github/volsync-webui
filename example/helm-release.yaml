@@ -1,0 +1,92 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: volsync-webui
+  namespace: backup
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: app-template
+      version: 4.6.2
+      sourceRef:
+        kind: HelmRepository
+        name: bjw-s-charts
+        namespace: flux-system
+
+  values:
+    defaultPodOptions:
+      automountServiceAccountToken: true
+
+    serviceAccount:
+      volsync-webui:
+        enabled: true
+        annotations: {}
+
+    rbac:
+      roles:
+        volsync-webui:
+          enabled: true
+          type: ClusterRole
+          rules:
+            - apiGroups: ["volsync.backube"]
+              resources: ["replicationsources", "replicationdestinations", "replicationdestinations/status"]
+              verbs: ["get", "list", "patch", "watch", "update"]
+            - apiGroups: [""]
+              resources: ["pods", "pods/log"]
+              verbs: ["get", "list", "create", "delete"]
+            - apiGroups: [""]
+              resources: ["namespaces"]
+              verbs: ["get", "list"]
+            - apiGroups: ["apps"]
+              resources: ["deployments", "deployments/scale"]
+              verbs: ["get", "list", "patch"]
+            - apiGroups: ["helm.toolkit.fluxcd.io"]
+              resources: ["helmreleases"]
+              verbs: ["get", "list", "patch"]
+      bindings:
+        volsync-webui:
+          enabled: true
+          type: ClusterRoleBinding
+          roleRef:
+            identifier: volsync-webui
+          subjects:
+            - identifier: volsync-webui
+
+    controllers:
+      volsync-webui:
+        containers:
+          app:
+            image:
+              repository: ghcr.io/niki-on-github/volsync-webui
+              tag: "v0.0.2@sha256:45a0ea2d08942b5c8dac722a6bb129d13c0d8a826c3a4229058e9ffb1c2fd76c"
+            env:
+              VOLSYNC_API_GROUP: "volsync.backube"
+              VOLSYNC_SOURCE_SUFFIX: "-backup"
+              VOLSYNC_DEST_SUFFIX: "-bootstrap"
+
+    service:
+      webui:
+        controller: volsync-webui
+        ports:
+          http:
+            port: 8080
+
+    ingress:
+      webui:
+        className: traefik
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+        hosts:
+          - host: &ingress "volsync-webui.${SECRET_DOMAIN}"
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: webui
+                  port: http
+        tls:
+          - hosts:
+              - *ingress
