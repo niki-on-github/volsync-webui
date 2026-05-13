@@ -46,6 +46,12 @@ spec:
             - apiGroups: ["helm.toolkit.fluxcd.io"]
               resources: ["helmreleases"]
               verbs: ["get", "list", "patch"]
+            - apiGroups: [""]
+              resources: ["persistentvolumeclaims"]
+              verbs: ["get", "list"]
+            - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+              resources: ["kustomizations"]
+              verbs: ["get", "patch", "list"]
       bindings:
         volsync-webui:
           enabled: true
@@ -61,7 +67,7 @@ spec:
           app:
             image:
               repository: ghcr.io/niki-on-github/volsync-webui
-              tag: "v0.1.5"
+              tag: "v0.2.2"
             env:
               VOLSYNC_API_GROUP: "volsync.backube"
               VOLSYNC_SOURCE_SUFFIX: "-backup"
