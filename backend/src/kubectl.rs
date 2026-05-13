@@ -66,6 +66,7 @@ pub struct Kubectl {
     api_group: String,
     source_suffix: String,
     dest_suffix: String,
+    pvc_suffix: String,
     token: Option<String>,
     pub tasks: Arc<RwLock<HashMap<String, TaskStatus>>>,
 }
@@ -91,6 +92,9 @@ impl Kubectl {
             .unwrap_or_else(|_| "-backup".to_string());
         let dest_suffix = std::env::var("VOLSYNC_DEST_SUFFIX")
             .unwrap_or_else(|_| "-bootstrap".to_string());
+
+        let pvc_suffix = std::env::var("VOLSYNC_PVC_SUFFIX")
+            .unwrap_or_else(|_| "-pvc".to_string());
 
         let token_path = std::path::Path::new("/var/run/secrets/kubernetes.io/serviceaccount/token");
         let token = if token_path.exists() {
@@ -149,7 +153,7 @@ impl Kubectl {
             })
         };
 
-        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, token, tasks: Arc::new(RwLock::new(HashMap::new())) })
+        Ok(Self { client, base_url, api_group, source_suffix, dest_suffix, pvc_suffix, token, tasks: Arc::new(RwLock::new(HashMap::new())) })
     }
 
     fn dest_crd_name(&self, app: &str) -> String {
@@ -162,6 +166,90 @@ impl Kubectl {
             .filter(|s| !s.is_empty())
             .unwrap_or(app)
             .to_string()
+    }
+
+    fn pvc_name(&self, base_app: &str) -> String {
+        format!("{}{}", base_app, self.pvc_suffix)
+    }
+
+    async fn delete_pvc(&self, ns: &str, name: &str) -> Result<(), KubeError> {
+        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
+        match self.request_text("DELETE", &url, None).await {
+            Ok(_) => {
+                tracing::info!("PVC {}/{} deleted", ns, name);
+                Ok(())
+            }
+            Err(KubeError::NotFound(_)) => {
+                tracing::warn!("PVC {}/{} not found, nothing to delete", ns, name);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to delete PVC {}/{}: {}", ns, name, e);
+                Err(e)
+            }
+        }
+    }
+
+    async fn wait_for_pvc_deleted(&self, ns: &str, name: &str) -> Result<(), KubeError> {
+        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
+        let timeout = Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            match self.request_text("GET", &url, None).await {
+                Err(KubeError::NotFound(_)) => {
+                    tracing::info!("PVC {}/{} confirmed deleted", ns, name);
+                    return Ok(());
+                }
+                Ok(_) => {
+                    tracing::debug!("PVC {}/{} still exists, waiting...", ns, name);
+                    sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    tracing::warn!("Error polling PVC deletion for {}/{}: {}", ns, name, e);
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+        Err(KubeError::Timeout(format!(
+            "PVC {}/{} was not deleted within {}s timeout",
+            ns, name, 30
+        )))
+    }
+
+    async fn wait_for_pvc_bound(&self, ns: &str, name: &str) -> Result<(), KubeError> {
+        let url = format!("/api/v1/namespaces/{}/persistentvolumeclaims/{}", ns, name);
+        let timeout = Duration::from_secs(120);
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            match self.request("GET", &url, None).await {
+                Ok(pvc) => {
+                    if let Some(phase) = pvc
+                        .get("status")
+                        .and_then(|s| s.get("phase"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if phase == "Bound" {
+                            tracing::info!("PVC {}/{} is Bound", ns, name);
+                            return Ok(());
+                        }
+                        tracing::debug!("PVC {}/{} phase={}, waiting...", ns, name, phase);
+                    }
+                    sleep(Duration::from_secs(2)).await;
+                }
+                Err(KubeError::NotFound(_)) => {
+                    tracing::debug!("PVC {}/{} not yet created, waiting...", ns, name);
+                    sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    tracing::warn!("Error polling PVC status for {}/{}: {}", ns, name, e);
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+        Err(KubeError::Timeout(format!(
+            "PVC {}/{} did not become Bound within {}s timeout",
+            ns, name, 120
+        )))
     }
 
     async fn find_app_deployments(&self, base: &str, ns: &str) -> Vec<String> {
@@ -237,6 +325,10 @@ impl Kubectl {
             (
                 "list HelmReleases",
                 "/apis/helm.toolkit.fluxcd.io/v2/helmreleases".to_string(),
+            ),
+            (
+                "list PVCs",
+                "/api/v1/persistentvolumeclaims".to_string(),
             ),
         ];
 
@@ -843,47 +935,51 @@ impl Kubectl {
         tracing::info!("trigger_restore starting for app={} namespace={} timestamp={:?}", app, ns, timestamp);
         let base_app = self.app_base_name(app);
 
-        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, base_app);
-        if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": true } }))).await {
-            tracing::warn!("trigger_restore HelmRelease suspend failed for app={} (non-Flux apps can ignore this): {}", base_app, e);
-        } else {
-            tracing::info!("trigger_restore HelmRelease suspended for app={}", base_app);
+        // Step 1: HelmRelease is REQUIRED — fail if not found
+        let hr_url = format!(
+            "/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}",
+            ns, base_app
+        );
+        match self.request("GET", &hr_url, None).await {
+            Ok(_) => tracing::info!("HelmRelease {}/{} found", ns, base_app),
+            Err(KubeError::NotFound(_)) => {
+                return Err(KubeError::Api(format!(
+                    "HelmRelease {}/{} not found. Restore requires a Flux-managed HelmRelease \
+                     with a PVC using dataSourceRef pointing to a ReplicationDestination. \
+                     See README for setup instructions.",
+                    ns, base_app
+                )));
+            }
+            Err(e) => return Err(e),
         }
 
-        // Find all deployments belonging to this app via label selector,
-        // read original replica counts, then scale all to 0
-        let deploys = self.find_app_deployments(&base_app, ns).await;
-        let replica_map = self.read_deployments_replicas(&deploys, ns).await;
-        self.scale_deployments(&deploys, ns, 0).await;
-
+        // Step 2: Trigger restore on ReplicationDestination (app stays running)
         let dst_name = self.dest_crd_name(app);
         let dst_url = format!(
             "/apis/{}/v1alpha1/namespaces/{}/replicationdestinations/{}",
             self.api_group, ns, dst_name
         );
 
-        // Read current spec.trigger.manual — this is what Flux maintains as the desired state.
-        // If unset (non-Flux app), generate one so the poll loop has something to match.
-        let current_rd: Value = match self.request("GET", &dst_url, None).await {
-            Ok(rd) => rd,
-            Err(e) => {
-                self.resume_restore(app, ns, &replica_map).await;
-                return Err(e);
-            }
-        };
-        let mut flux_trigger = current_rd.get("spec")
+        let current_rd: Value = self.request("GET", &dst_url, None).await?;
+
+        // Flux manages spec.trigger.manual — read the current value
+        let flux_trigger = current_rd
+            .get("spec")
             .and_then(|s| s.get("trigger"))
             .and_then(|t| t.get("manual"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let generated_trigger = flux_trigger.is_empty();
-        if generated_trigger {
-            flux_trigger = format!("restore-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            tracing::info!("trigger_restore generated new trigger for non-Flux app: {}", flux_trigger);
+        if flux_trigger.is_empty() {
+            return Err(KubeError::Api(format!(
+                "ReplicationDestination {}/{} has no spec.trigger.manual set. \
+                 Ensure your HelmRelease sets spec.trigger.manual for restore to work.",
+                ns, dst_name
+            )));
         }
         tracing::debug!("trigger_restore using spec.trigger.manual='{}'", flux_trigger);
 
+        // Build restic spec with optional restoreAsOf
         let mut restic_spec = serde_json::json!({});
         if let Some(ts) = timestamp {
             if !ts.is_empty() {
@@ -891,113 +987,205 @@ impl Kubectl {
             }
         }
 
-        let mut dst_patch = serde_json::json!({
+        let dst_patch = serde_json::json!({
             "spec": { "restic": restic_spec }
         });
-        if generated_trigger {
-            dst_patch["spec"]["trigger"] = serde_json::json!({ "manual": &flux_trigger });
-        }
 
-        tracing::debug!("trigger_restore PATCHing ReplicationDestination");
+        tracing::debug!("trigger_restore PATCHing ReplicationDestination with restoreAsOf");
         if let Err(e) = self.request("PATCH", &dst_url, Some(dst_patch)).await {
-            tracing::error!("trigger_restore failed to patch ReplicationDestination, rolling back: {}", e);
-            self.resume_restore(app, ns, &replica_map).await;
-            return Err(KubeError::Api(format!("Failed to patch ReplicationDestination: {}", e)));
+            return Err(KubeError::Api(format!(
+                "Failed to patch ReplicationDestination: {}",
+                e
+            )));
         }
 
-        // Trigger restore by nullifying status.lastManualSync — VolSync will see
-        // spec.trigger.manual (Flux's value) != status.lastManualSync (null → "")
+        // Trigger restore by nullifying status.lastManualSync
         let status_url = format!("{}/status", dst_url);
         tracing::debug!("trigger_restore resetting status.lastManualSync to trigger restore");
-        if let Err(e) = self.request("PATCH", &status_url, Some(serde_json::json!({
-            "status": { "lastManualSync": serde_json::Value::Null }
-        }))).await {
-            tracing::error!("trigger_restore failed to patch RD status, rolling back: {}", e);
-            self.resume_restore(app, ns, &replica_map).await;
-            return Err(KubeError::Api(format!("Failed to patch ReplicationDestination status: {}", e)));
+        if let Err(e) = self
+            .request(
+                "PATCH",
+                &status_url,
+                Some(serde_json::json!({
+                    "status": { "lastManualSync": serde_json::Value::Null }
+                })),
+            )
+            .await
+        {
+            return Err(KubeError::Api(format!(
+                "Failed to patch ReplicationDestination status: {}",
+                e
+            )));
         }
-        tracing::info!("trigger_restore status.lastManualSync reset, waiting for VolSync to process");
+        tracing::info!(
+            "trigger_restore status.lastManualSync reset, waiting for VolSync to process"
+        );
 
+        // Poll until restore completes (app is still running)
         let restore_timeout = restore_timeout_secs();
         let poll_interval = polling_interval_secs();
-        tracing::info!("trigger_restore polling with timeout={}s interval={}s", restore_timeout, poll_interval);
+        tracing::info!(
+            "trigger_restore polling with timeout={}s interval={}s",
+            restore_timeout,
+            poll_interval
+        );
 
         let start = std::time::Instant::now();
         let mut poll_count = 0;
         loop {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(restore_timeout) {
-                tracing::warn!("trigger_restore polling timed out after {} polls for app={}", poll_count, app);
-                self.resume_restore(app, ns, &replica_map).await;
+                tracing::warn!(
+                    "trigger_restore polling timed out after {} polls for app={}",
+                    poll_count,
+                    app
+                );
                 return Err(KubeError::Timeout("Restore polling timed out".to_string()));
             }
             sleep(Duration::from_secs(poll_interval)).await;
 
-            let dst: Value = match self.request("GET", &dst_url, None).await {
-                Ok(d) => d,
-                Err(e) => {
-                    self.resume_restore(app, ns, &replica_map).await;
-                    return Err(e);
-                }
-            };
+            let dst: Value = self.request("GET", &dst_url, None).await?;
 
-            if let Some(last_sync) = dst.get("status")
+            if let Some(last_sync) = dst
+                .get("status")
                 .and_then(|s| s.get("lastManualSync"))
-                .and_then(|v| v.as_str()) {
+                .and_then(|v| v.as_str())
+            {
                 if last_sync == flux_trigger {
-                    // Verify mover status before reporting completed
-                    let result = dst.get("status")
+                    let result = dst
+                        .get("status")
                         .and_then(|s| s.get("latestMoverStatus"))
                         .and_then(|m| m.get("result"))
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
-                    let finished = result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
+                    let finished =
+                        result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
-                        tracing::info!("trigger_restore completed on poll #{} for app={} (trigger={:?})", poll_count, app, flux_trigger);
-                        // Resume deployment and HelmRelease — no trigger cleanup needed
-                        self.resume_restore(app, ns, &replica_map).await;
-                        tracing::info!("trigger_restore fully finished — deployments restored and HelmRelease resumed for app={}", app);
+                        tracing::info!(
+                            "trigger_restore completed on poll #{} for app={}",
+                            poll_count,
+                            app
+                        );
+
+                        // --- Post-restore: Suspend HR, scale down, delete PVC, unsuspend ---
+
+                        let pvc_name = self.pvc_name(&base_app);
+
+                        // 3. Suspend HelmRelease
+                        if let Err(e) = self
+                            .request(
+                                "PATCH",
+                                &hr_url,
+                                Some(serde_json::json!({ "spec": { "suspended": true } })),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to suspend HelmRelease (continuing): {}",
+                                e
+                            );
+                        } else {
+                            tracing::info!("HelmRelease suspended for app={}", base_app);
+                        }
+
+                        // 4. Scale down deployments to 0 (detach from PVC)
+                        let deploys = self.find_app_deployments(&base_app, ns).await;
+                        let replica_map =
+                            self.read_deployments_replicas(&deploys, ns).await;
+                        self.scale_deployments(&deploys, ns, 0).await;
+
+                        // Helper to scale back up on error
+                        let scale_back = || async {
+                            for (name, replicas) in &replica_map {
+                                let scale_url = format!(
+                                    "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
+                                    ns, name
+                                );
+                                let _ = self
+                                    .request(
+                                        "PATCH",
+                                        &scale_url,
+                                        Some(serde_json::json!({ "spec": { "replicas": replicas } })),
+                                    )
+                                    .await;
+                            }
+                        };
+
+                        // 5. Delete the application PVC
+                        if let Err(e) = self.delete_pvc(ns, &pvc_name).await {
+                            scale_back().await;
+                            return Err(e);
+                        }
+                        if let Err(e) =
+                            self.wait_for_pvc_deleted(ns, &pvc_name).await
+                        {
+                            scale_back().await;
+                            return Err(e);
+                        }
+
+                        // 6. Unsuspend HelmRelease — Flux recreates PVC,
+                        //    dataSourceRef resolves to the new VolSync snapshot
+                        if let Err(e) = self
+                            .request(
+                                "PATCH",
+                                &hr_url,
+                                Some(serde_json::json!({ "spec": { "suspended": false } })),
+                            )
+                            .await
+                        {
+                            scale_back().await;
+                            return Err(KubeError::Api(format!(
+                                "Restore data is ready but failed to unsuspend HelmRelease: {}. \
+                                 Manual intervention required: unsuspend the HelmRelease to \
+                                 recreate the PVC from the new snapshot.",
+                                e
+                            )));
+                        }
+                        tracing::info!("HelmRelease unsuspended for app={}", base_app);
+
+                        // 7. Wait for Flux to recreate PVC and bind it
+                        if let Err(e) =
+                            self.wait_for_pvc_bound(ns, &pvc_name).await
+                        {
+                            tracing::warn!(
+                                "PVC {} did not become Bound (Flux will keep retrying): {}",
+                                pvc_name,
+                                e
+                            );
+                        }
+
+                        tracing::info!(
+                            "trigger_restore fully finished for app={}",
+                            app
+                        );
                         return Ok(RestoreResponse {
                             trigger: flux_trigger,
                             status: "completed".to_string(),
                             result,
                         });
                     } else {
-                        tracing::warn!("trigger_restore failed on poll #{} for app={}: result={:?}", poll_count, app, result);
-                        self.resume_restore(app, ns, &replica_map).await;
+                        tracing::warn!(
+                            "trigger_restore failed on poll #{} for app={}: result={:?}",
+                            poll_count,
+                            app,
+                            result
+                        );
                         return Err(KubeError::SnapshotFailed(format!(
-                            "Restore failed with result: {:?}", result
+                            "Restore failed with result: {:?}",
+                            result
                         )));
                     }
                 }
             }
 
             if poll_count % 15 == 0 {
-                tracing::debug!("trigger_restore poll #{} for app={} (still waiting)", poll_count, app);
+                tracing::debug!(
+                    "trigger_restore poll #{} for app={} (still waiting)",
+                    poll_count,
+                    app
+                );
             }
-        }
-    }
-
-    /// Resume the deployments and HelmRelease to their original state after restore completes (success or failure)
-    async fn resume_restore(&self, app: &str, ns: &str, replica_map: &HashMap<String, i64>) {
-        tracing::debug!("resume_restore called for app={} with {} deployments to restore", app, replica_map.len());
-
-        for (name, replicas) in replica_map {
-            let scale_url = format!("/apis/apps/v1/namespaces/{}/deployments/{}/scale", ns, name);
-            if let Err(e) = self.request("PATCH", &scale_url, Some(serde_json::json!({ "spec": { "replicas": replicas } }))).await {
-                tracing::warn!("resume_restore failed to scale deployment {} back to {} replicas: {}", name, replicas, e);
-            } else {
-                tracing::info!("resume_restore scaled deployment {} back to {} replicas", name, replicas);
-            }
-        }
-
-        let base_app = self.app_base_name(app);
-        let hr_url = format!("/apis/helm.toolkit.fluxcd.io/v2/namespaces/{}/helmreleases/{}", ns, base_app);
-        if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
-            tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", base_app, e);
-        } else {
-            tracing::info!("resume_restore HelmRelease unsuspended for app={} ns={}", base_app, ns);
         }
     }
 }

@@ -125,6 +125,9 @@ rules:
   - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
     verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "delete"]
 ```
 
 The app runs a startup RBAC check that probes each API endpoint and logs whether permissions are present. Missing permissions are non-fatal (logged as errors but the app continues).
@@ -138,6 +141,7 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 | `VOLSYNC_API_GROUP` | `volsync.backube` | API group for VolSync CRDs (set to `replication.storage.io` for older clusters) |
 | `VOLSYNC_SOURCE_SUFFIX` | `-backup` | Suffix on ReplicationSource CRD names (e.g. `gitea-backup`) |
 | `VOLSYNC_DEST_SUFFIX` | `-bootstrap` | Suffix on ReplicationDestination CRD names (e.g. `gitea-bootstrap`) |
+| `VOLSYNC_PVC_SUFFIX` | `-pvc` | Suffix on PVC name (e.g. `gitea-pvc`). The PVC name is derived as `{base_app_name}{suffix}`. |
 | `REFRESH_INTERVAL_SECS` | `3600` | Frontend auto-refresh interval in seconds (1 hour default) |
 | `BACKUP_ALL_CONCURRENCY` | `5` | Max concurrent backups for backup-all |
 | `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
@@ -153,6 +157,57 @@ The destination CRD name is derived by stripping `VOLSYNC_SOURCE_SUFFIX` and app
 ```
 gitea-backup  → strips -backup  → gitea  → appends -bootstrap  → gitea-bootstrap
 ```
+
+## Restore Workflow
+
+The restore operation requires a specific PVC setup using Kubernetes Volume Populators. The application PVC must be defined with a `dataSourceRef` pointing to the `ReplicationDestination`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "${APP_NAME}-pvc"          # PVC name = {app_name} + VOLSYNC_PVC_SUFFIX (default "-pvc")
+  namespace: ${APP_NAMESPACE}
+spec:
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "${PVC_CAPACITY:-1Gi}"
+  storageClassName: "openebs-zfspv"
+  dataSourceRef:
+    kind: ReplicationDestination
+    apiGroup: volsync.backube
+    name: "${APP_NAME}-bootstrap"   # Must match the ReplicationDestination CRD name
+```
+
+This `dataSourceRef` tells Kubernetes to populate the PVC from the ReplicationDestination's latest VolumeSnapshot when the PVC is created. The ReplicationDestination name must match the derived name: `{base_app_name}{VOLSYNC_DEST_SUFFIX}`.
+
+### Optimized Restore Flow
+
+The restore follows a zero-downtime sequence:
+
+```
+ 1. Trigger restore on ReplicationDestination   ← app stays running
+ 2. Poll until restore completes                 ← VolSync downloads backup into temp PVC
+ 3. Suspend HelmRelease                          ← prevent Flux interference
+ 4. Scale down deployments to 0                  ← detach app from old PVC
+ 5. DELETE the application PVC                   ← old volume removed
+ 6. Unsuspend HelmRelease                        ← Flux wakes up, reconciles:
+    ├─ Flux/Helm recreates PVC with dataSourceRef
+    ├─ K8s binds PVC to the new VolSync snapshot
+    └─ Flux scales deployment back to desired replicas
+```
+
+Key details:
+- **Step 1-2**: VolSync restores data into a temporary PVC while the application continues serving traffic. The app only goes down at step 4.
+- **Step 5**: Deleting the PVC is essential — Kubernetes only evaluates `dataSourceRef` at PVC creation time. Without deletion, the old PV stays bound.
+- **Step 6**: Flux handles both PVC recreation and scaling. Manual scale-up is unnecessary.
+- **HelmRelease required**: Restore only works for Flux-managed apps. Non-Flux apps will receive an error.
+
+### Errors During Post-Restore
+
+If PVC deletion fails, the restore task fails and the deployment is scaled back to its original replica count for safety. If PVC deletion succeeds but HelmRelease unsuspension fails, the restore data is ready but manual intervention is required: unsuspend the HelmRelease to trigger PVC recreation.
 
 ### API Group Configuration
 
