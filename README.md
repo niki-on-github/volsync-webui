@@ -2,8 +2,7 @@
 
 A web-based management interface for VolSync replication and backup operations on Kubernetes.
 
-> [!CAUTION]
-> This project is 101% AI generated. The code was not yet reviewed by me. I make the repo public to allow easy testing. Dont expect to be anything functional.
+A example deployment of this repository is in the `./example/` direcotry.
 
 ## Features
 
@@ -13,44 +12,6 @@ A web-based management interface for VolSync replication and backup operations o
 - **Restore Operations**: Restore from any available snapshot timestamp via the detail panel
 - **Auto-Refresh**: Periodically updates the app list with configurable interval (default: 1 hour, no-overlap guard)
 - **Manual Refresh**: Refresh button in header to fetch latest data on demand
-
-## Architecture
-
-```
-volsync-webui/
-├── backend/                    # Axum-based REST API server
-│   └── src/
-│       ├── main.rs             # Server entry point, router setup
-│       ├── api.rs              # HTTP handlers for all endpoints
-│       ├── kubectl.rs          # Kubernetes API client (raw HTTP via reqwest)
-│       └── models.rs           # Request/response data structures
-├── frontend/                   # React + Vite web UI
-│   ├── index.html
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tailwind.config.ts
-│   └── src/
-│       ├── main.tsx            # Entry point
-│       ├── App.tsx             # Main layout with master-detail view
-│       ├── api.ts              # Frontend API client (fetch)
-│       ├── types.ts            # TypeScript interfaces
-│       ├── index.css           # Tailwind + CSS variables
-│       ├── lib/utils.ts        # cn() helper
-│       └── components/
-│           ├── apps-table.tsx  # Dashboard table with all apps
-│           ├── app-detail.tsx  # Detail panel with snapshots/backup/restore
-│           └── ui/             # shadcn primitives (Button, Card, Select, Table, Badge)
-└── Dockerfile                  # Multi-stage container build
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend | Axum 0.7, Tokio, reqwest |
-| Frontend | React 18, TypeScript, Vite 6, TailwindCSS 3, shadcn/ui |
-| Kubernetes | Raw HTTP API via reqwest (in-cluster) |
-| Container | Debian bookworm-slim |
 
 ## API Endpoints
 
@@ -84,9 +45,7 @@ The `/api/apps` endpoint returns extended status information for each Replicatio
 
 ### Prerequisites
 
-- Rust 1.75+
-- Node.js 18+
-- Nix (for development shell, optional)
+- Nix (for development shelll)
 
 ### Nix Dev Shell
 
@@ -125,16 +84,11 @@ cargo run -p volsync-webui-backend
 
 ## Deployment
 
-### Docker
-
-```bash
-docker build -t volsync-webui:latest .
-docker run -p 8080:8080 volsync-webui:latest
-```
-
-The container expects to run inside a Kubernetes cluster with access to the Kubernetes API.
+A example deployment of this repository is in the `./example/` direcotry.
 
 ### Kubernetes
+
+The container expects to run inside a Kubernetes cluster with access to the Kubernetes API.
 
 Apply the RBAC configuration from the section below, then deploy the container:
 
