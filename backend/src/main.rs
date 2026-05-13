@@ -2,7 +2,7 @@ mod api;
 mod kubectl;
 mod models;
 
-use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_backup_all, trigger_restore, get_config, get_dest_repository, get_backup_status, get_restore_status};
+use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_restore, get_config, get_dest_repository, get_backup_status, get_restore_status};
 use std::sync::Arc;
 use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
@@ -108,7 +108,6 @@ async fn main() {
         .route("/api/apps/:app/:ns/snapshots", axum::routing::get(get_snapshots))
         .route("/api/apps/:app/:ns/backup", axum::routing::post(trigger_backup))
         .route("/api/apps/:app/:ns/restore", axum::routing::post(trigger_restore))
-        .route("/api/apps/backup-all", axum::routing::post(trigger_backup_all))
         .route("/api/apps/:app/:ns/backup/status", axum::routing::get(get_backup_status))
         .route("/api/apps/:app/:ns/restore/status", axum::routing::get(get_restore_status))
         .route("/api/apps/:app/:ns/destination/repository", axum::routing::get(get_dest_repository))
@@ -134,7 +133,6 @@ async fn main() {
     tracing::info!("  POST /api/apps/:app/:ns/restore");
     tracing::info!("  GET  /api/apps/:app/:ns/backup/status");
     tracing::info!("  GET  /api/apps/:app/:ns/restore/status");
-    tracing::info!("  POST /api/apps/backup-all");
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!("Server error: {}", e);
         std::process::exit(1);

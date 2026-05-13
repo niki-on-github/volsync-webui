@@ -104,6 +104,9 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const [destLoaded, setDestLoaded] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
+  const onBackupCompleteRef = useRef(onBackupComplete);
+  onBackupCompleteRef.current = onBackupComplete;
 
   const selectedSnap = timestamp && timestamp !== "__latest__"
     ? snapshots.find(s => s.time === timestamp)
@@ -119,8 +122,10 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   const startPolling = useCallback((taskType: "backup" | "restore") => {
     stopPolling();
     const poll = async () => {
+      if (!mountedRef.current) return;
       const fn = taskType === "backup" ? api.getBackupStatus : api.getRestoreStatus;
       const status = await fn(app.name, app.namespace);
+      if (!mountedRef.current) return;
       if (!status) {
         if (taskType === "backup") { setBackingUp(false); setBackupStatus(null); }
         else { setRestoring(false); setRestoreStatus(null); }
@@ -132,12 +137,11 @@ export function AppDetail({ app, onBackupComplete }: Props) {
         if (taskType === "backup") {
           setBackingUp(false);
           setBackupStatus(status.result ? `Backup completed: ${status.result}` : "Backup completed");
-          onBackupComplete();
         } else {
           setRestoring(false);
           setRestoreStatus(status.result ? `Restore completed: ${status.result}` : "Restore completed");
-          onBackupComplete();
         }
+        onBackupCompleteRef.current();
         return;
       }
       if (status.status === "failed") {
@@ -161,7 +165,7 @@ export function AppDetail({ app, onBackupComplete }: Props) {
     };
     poll();
     pollRef.current = setInterval(poll, 2000);
-  }, [app.name, app.namespace, stopPolling, onBackupComplete]);
+  }, [app.name, app.namespace, stopPolling]);
 
   // Resume polling if re-mounting with active tasks
   useEffect(() => {
@@ -179,6 +183,12 @@ export function AppDetail({ app, onBackupComplete }: Props) {
   useEffect(() => {
     return stopPolling;
   }, [stopPolling]);
+
+  // Track mount state to avoid setState on unmounted component
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     setTimestamp("");

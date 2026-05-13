@@ -1,4 +1,4 @@
-use crate::models::{App, BackupAllResponse, BackupResponse, BackupSummary, RestoreResponse, Snapshot, TaskStatus};
+use crate::models::{App, BackupResponse, RestoreResponse, Snapshot, TaskStatus};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -372,11 +372,19 @@ impl Kubectl {
                 .and_then(|s| s.get("lastSyncTime"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let last_sync_duration = status
+            let last_sync_duration = match status
                 .and_then(|s| s.get("lastSyncDuration"))
                 .and_then(|v| v.as_str())
-                .and_then(|s| s.trim_end_matches('s').parse::<f64>().ok())
-                .map(|d| format!("{:.1}s", d));
+            {
+                Some(s) => match s.trim_end_matches('s').parse::<f64>() {
+                    Ok(d) => Some(format!("{:.1}s", d)),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse lastSyncDuration '{}' for app '{}': {}", s, name, e);
+                        None
+                    }
+                },
+                None => None,
+            };
             let last_result = status
                 .and_then(|s| s.get("latestMoverStatus"))
                 .and_then(|m| m.get("result"))
@@ -551,41 +559,20 @@ impl Kubectl {
         }
     }
 
-    pub async fn trigger_backup_all(self: Arc<Self>, trigger: &str) -> Result<BackupAllResponse, KubeError> {
-        let apps = self.list_apps().await?;
-        let trigger_owned = trigger.to_string();
-        let mut triggered = 0u32;
-        let mut failed = 0u32;
-
-        for app in &apps {
-            match self.clone().spawn_backup(app.name.clone(), app.namespace.clone(), trigger_owned.clone()).await {
-                Ok(_) => triggered += 1,
-                Err(e) => {
-                    tracing::warn!("Failed to spawn backup for {}: {}", app.name, e);
-                    failed += 1;
-                }
-            }
-        }
-
-        Ok(BackupAllResponse {
-            trigger: trigger.to_string(),
-            apps: vec![],
-            summary: Some(BackupSummary {
-                total: apps.len(),
-                success: triggered as usize,
-                failed: failed as usize,
-            }),
-        })
-    }
-
     pub async fn spawn_backup(self: Arc<Self>, app: String, ns: String, trigger: String) -> Result<TaskStatus, KubeError> {
         let task_key = format!("{}/{}/backup", ns, app);
+        let restore_key = format!("{}/{}/restore", ns, app);
 
         {
             let mut tasks = self.tasks.write().await;
             if let Some(existing) = tasks.get(&task_key) {
                 if existing.status == "pending" || existing.status == "running" {
                     return Err(KubeError::Api(format!("Backup already in progress for {}", app)));
+                }
+            }
+            if let Some(restore) = tasks.get(&restore_key) {
+                if restore.status == "pending" || restore.status == "running" {
+                    return Err(KubeError::Api(format!("Backup cannot start while restore is in progress for {}", app)));
                 }
             }
             tasks.remove(&task_key);
@@ -621,6 +608,12 @@ impl Kubectl {
                         t.status = "completed".to_string();
                         t.result = resp.result;
                     }
+                    let cleanup = me.clone();
+                    let ck = task_key.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(30)).await;
+                        cleanup.tasks.write().await.remove(&ck);
+                    });
                 }
                 Err(e) => {
                     let mut tasks = me.tasks.write().await;
@@ -628,6 +621,12 @@ impl Kubectl {
                         t.status = "failed".to_string();
                         t.error = Some(e.to_string());
                     }
+                    let cleanup = me.clone();
+                    let ck = task_key.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(30)).await;
+                        cleanup.tasks.write().await.remove(&ck);
+                    });
                 }
             }
         });
@@ -637,12 +636,18 @@ impl Kubectl {
 
     pub async fn spawn_restore(self: Arc<Self>, app: String, ns: String, trigger: String, timestamp: Option<String>) -> Result<TaskStatus, KubeError> {
         let task_key = format!("{}/{}/restore", ns, app);
+        let backup_key = format!("{}/{}/backup", ns, app);
 
         {
             let mut tasks = self.tasks.write().await;
             if let Some(existing) = tasks.get(&task_key) {
                 if existing.status == "pending" || existing.status == "running" {
                     return Err(KubeError::Api(format!("Restore already in progress for {}", app)));
+                }
+            }
+            if let Some(backup) = tasks.get(&backup_key) {
+                if backup.status == "pending" || backup.status == "running" {
+                    return Err(KubeError::Api(format!("Restore cannot start while backup is in progress for {}", app)));
                 }
             }
             tasks.remove(&task_key);
@@ -678,6 +683,12 @@ impl Kubectl {
                         t.status = "completed".to_string();
                         t.result = resp.result;
                     }
+                    let cleanup = me.clone();
+                    let ck = task_key.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(30)).await;
+                        cleanup.tasks.write().await.remove(&ck);
+                    });
                 }
                 Err(e) => {
                     let mut tasks = me.tasks.write().await;
@@ -685,6 +696,12 @@ impl Kubectl {
                         t.status = "failed".to_string();
                         t.error = Some(e.to_string());
                     }
+                    let cleanup = me.clone();
+                    let ck = task_key.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(30)).await;
+                        cleanup.tasks.write().await.remove(&ck);
+                    });
                 }
             }
         });
@@ -747,15 +764,14 @@ impl Kubectl {
         let _create: Value = self.request("POST", &create_url, Some(pod_manifest)).await?;
         tracing::debug!("get_snapshots pod {} created successfully", pod_name);
 
+        let mut guard = PodGuard::new(self.client.clone(), &self.base_url, self.token.clone(), &pod_url);
+
         let start = std::time::Instant::now();
         let mut poll_count = 0;
         loop {
             poll_count += 1;
             if start.elapsed() > Duration::from_secs(pod_startup_timeout_secs()) {
                 tracing::warn!("get_snapshots pod {} timed out after {} polls", pod_name, poll_count);
-                if let Err(e) = self.request("DELETE", &pod_url, None).await {
-                    tracing::warn!("get_snapshots failed to clean up timed-out pod {}: {}", pod_name, e);
-                }
                 return Err(KubeError::Timeout("Pod startup timed out".to_string()));
             }
 
@@ -774,9 +790,6 @@ impl Kubectl {
                             }
                             "Failed" => {
                                 tracing::warn!("get_snapshots pod {} failed after {} polls", pod_name, poll_count);
-                                if let Err(e) = self.request("DELETE", &pod_url, None).await {
-                                    tracing::warn!("get_snapshots failed to clean up failed pod {}: {}", pod_name, e);
-                                }
                                 return Err(KubeError::SnapshotFailed("Pod failed".to_string()));
                             }
                             _ => {}
@@ -794,12 +807,8 @@ impl Kubectl {
         let logs = self.request_text("GET", &log_url, None).await?;
         tracing::debug!("get_snapshots fetched {} bytes of logs for pod {}", logs.len(), pod_name);
 
-        // Clean up pod after reading logs — handle error gracefully but log it
-        if let Err(e) = self.request("DELETE", &pod_url, None).await {
-            tracing::warn!("get_snapshots pod cleanup failed: {}", e);
-        } else {
-            tracing::debug!("get_snapshots pod {} cleaned up", pod_name);
-        }
+        guard.cleanup().await;
+        tracing::debug!("get_snapshots pod {} cleaned up", pod_name);
 
         let snapshots = parse_snapshots(&logs)?;
         if snapshots.is_empty() {
@@ -925,9 +934,10 @@ impl Kubectl {
 
                     let finished = result.as_deref().map_or(false, |r| r.eq_ignore_ascii_case("successful"));
                     if finished {
-                        tracing::info!("trigger_restore completed on poll #{} for app={}", poll_count, app);
+                        tracing::info!("trigger_restore completed on poll #{} for app={} (trigger={:?})", poll_count, app, flux_trigger);
                         // Resume deployment and HelmRelease — no trigger cleanup needed
                         self.resume_restore(app, ns, &replica_map).await;
+                        tracing::info!("trigger_restore fully finished — deployments restored and HelmRelease resumed for app={}", app);
                         return Ok(RestoreResponse {
                             trigger: flux_trigger,
                             status: "completed".to_string(),
@@ -967,8 +977,59 @@ impl Kubectl {
         if let Err(e) = self.request("PATCH", &hr_url, Some(serde_json::json!({ "spec": { "suspended": false } }))).await {
             tracing::warn!("resume_restore failed to unsuspend HelmRelease {}: {}", base_app, e);
         } else {
-            tracing::info!("resume_restore HelmRelease resumed for app={}", base_app);
+            tracing::info!("resume_restore HelmRelease unsuspended for app={} ns={}", base_app, ns);
         }
+    }
+}
+
+struct PodGuard {
+    client: reqwest::Client,
+    base_url: String,
+    token: Option<String>,
+    pod_url: String,
+    deleted: bool,
+}
+
+impl PodGuard {
+    fn new(client: reqwest::Client, base_url: &str, token: Option<String>, pod_url: &str) -> Self {
+        Self { client, base_url: base_url.to_string(), token, pod_url: pod_url.to_string(), deleted: false }
+    }
+
+    async fn cleanup(&mut self) {
+        if self.deleted {
+            return;
+        }
+        self.deleted = true;
+        let url = format!("{}{}", self.base_url, self.pod_url);
+        let mut req = self.client.request(reqwest::Method::DELETE, &url);
+        if let Some(ref t) = self.token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        if let Err(e) = req.send().await {
+            tracing::warn!("PodGuard cleanup failed: {}", e);
+        }
+    }
+}
+
+impl Drop for PodGuard {
+    fn drop(&mut self) {
+        if self.deleted {
+            return;
+        }
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let token = self.token.clone();
+        let pod_url = self.pod_url.clone();
+        tokio::spawn(async move {
+            let url = format!("{}{}", base_url, pod_url);
+            let mut req = client.request(reqwest::Method::DELETE, &url);
+            if let Some(ref t) = token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            if let Err(e) = req.send().await {
+                tracing::warn!("PodGuard drop cleanup failed: {}", e);
+            }
+        });
     }
 }
 

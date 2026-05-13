@@ -54,25 +54,6 @@ export interface RestoreResponse {
   result: string | null;
 }
 
-export interface AppBackupStatus {
-  app: string;
-  namespace: string;
-  success: boolean;
-  error: string | null;
-}
-
-export interface BackupAllResponse {
-  trigger: string;
-  apps: AppBackupStatus[];
-  summary: BackupSummary | null;
-}
-
-export interface BackupSummary {
-  total: number;
-  success: number;
-  failed: number;
-}
-
 export interface AppConfig {
   refresh_interval_secs: number;
 }

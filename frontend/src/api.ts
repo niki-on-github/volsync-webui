@@ -1,10 +1,11 @@
-import type { App, AppConfig, BackupAllResponse, TaskStatus, Snapshot } from "./types";
+import type { App, AppConfig, TaskStatus, Snapshot } from "./types";
 
 const BASE = typeof window !== "undefined" ? window.location.origin : "http://localhost:8080";
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${url}`, {
     headers: { "Content-Type": "application/json" },
+    cache: "no-cache",
     ...init,
   });
   if (!res.ok) {
@@ -52,15 +53,6 @@ export const api = {
       );
     } catch (e) {
       logError("triggerBackup", e);
-      throw e;
-    }
-  },
-
-  async triggerBackupAll(): Promise<BackupAllResponse> {
-    try {
-      return await fetchJson<BackupAllResponse>("/api/apps/backup-all", { method: "POST" });
-    } catch (e) {
-      logError("triggerBackupAll", e);
       throw e;
     }
   },

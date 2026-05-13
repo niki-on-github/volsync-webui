@@ -19,6 +19,11 @@ export default function App() {
     try {
       const a = await api.listApps();
       setApps(a);
+      setSelectedApp(prev => {
+        if (!prev) return null;
+        const updated = a.find(x => x.name === prev.name && x.namespace === prev.namespace);
+        return updated ?? prev;
+      });
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

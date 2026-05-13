@@ -94,23 +94,6 @@ pub async fn trigger_backup(
     Ok(Json(task))
 }
 
-pub async fn trigger_backup_all(State(kubectl): State<AppState>) -> Result<Json<BackupAllResponse>, ApiError> {
-    tracing::info!("trigger_backup_all called");
-    let trigger = format!("backup-{}", Utc::now().format("%Y%m%d-%H%M%S"));
-    tracing::debug!("trigger_backup_all using trigger ID: {}", trigger);
-    let resp = kubectl.trigger_backup_all(&trigger).await.map_err(|e| {
-        tracing::error!("trigger_backup_all failed: {}", e);
-        ApiError::from(e)
-    })?;
-
-    let total = resp.summary.as_ref().map(|s| s.total).unwrap_or(0);
-    let success = resp.summary.as_ref().map(|s| s.success).unwrap_or(0);
-    let failed = resp.summary.as_ref().map(|s| s.failed).unwrap_or(0);
-    tracing::info!("trigger_backup_all completed: {}/{} succeeded, {} failed", success, total, failed);
-
-    Ok(Json(resp))
-}
-
 pub async fn trigger_restore(
     Path((app, ns)): Path<(String, String)>,
     State(kubectl): State<AppState>,
