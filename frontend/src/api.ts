@@ -1,4 +1,4 @@
-import type { App, AppConfig, TaskStatus, Snapshot } from "./types";
+import type { App, TaskStatus, Snapshot, UnlockResponse } from "./types";
 
 const BASE = typeof window !== "undefined" ? window.location.origin : "http://localhost:8080";
 
@@ -21,10 +21,6 @@ function logError(context: string, e: unknown) {
 }
 
 export const api = {
-  async getConfig(): Promise<AppConfig> {
-    return fetchJson<AppConfig>("/api/config");
-  },
-
   async listApps(): Promise<App[]> {
     try {
       return await fetchJson<App[]>("/api/apps");
@@ -84,6 +80,18 @@ export const api = {
       );
     } catch {
       return null;
+    }
+  },
+
+  async triggerUnlock(app: string, ns: string): Promise<UnlockResponse> {
+    try {
+      return await fetchJson<UnlockResponse>(
+        `/api/apps/${encodeURIComponent(app)}/${encodeURIComponent(ns)}/unlock`,
+        { method: "POST" },
+      );
+    } catch (e) {
+      logError("triggerUnlock", e);
+      throw e;
     }
   },
 

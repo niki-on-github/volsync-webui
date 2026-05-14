@@ -79,7 +79,6 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 | `VOLSYNC_SOURCE_SUFFIX` | `-backup` | Suffix on ReplicationSource CRD names (e.g. `gitea-backup`) |
 | `VOLSYNC_DEST_SUFFIX` | `-bootstrap` | Suffix on ReplicationDestination CRD names (e.g. `gitea-bootstrap`) |
 | `VOLSYNC_PVC_SUFFIX` | `-pvc` | Suffix on PVC name (e.g. `gitea-pvc`). The PVC name is derived as `{base_app_name}{suffix}`. |
-| `REFRESH_INTERVAL_SECS` | `3600` | Frontend auto-refresh interval in seconds (1 hour default) |
 | `BACKUP_ALL_CONCURRENCY` | `5` | Max concurrent backups for backup-all |
 | `POLL_TIMEOUT_SECS` | `300` | Backup/restore poll timeout in seconds |
 | `POLL_INTERVAL_SECS` | `2` | Backup/restore poll interval in seconds |

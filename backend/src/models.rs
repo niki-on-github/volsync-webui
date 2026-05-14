@@ -11,6 +11,7 @@ pub struct App {
     pub in_progress: bool,
     pub paused: bool,
     pub repository: Option<String>,
+    pub repo_locked: bool,
     pub backup_pending: bool,
     pub restore_pending: bool,
 }
@@ -62,6 +63,7 @@ pub struct RestoreResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AppConfig {
-    pub refresh_interval_secs: u64,
+pub struct UnlockResponse {
+    pub message: String,
 }
+

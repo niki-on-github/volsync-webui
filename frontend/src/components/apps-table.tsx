@@ -26,6 +26,7 @@ const SORT_LABELS: Record<SortKey, string> = {
   in_progress: "",
   paused: "",
   repository: "",
+  repo_locked: "",
   backup_pending: "",
   restore_pending: "",
 };

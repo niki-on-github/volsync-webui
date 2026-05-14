@@ -1,4 +1,5 @@
 use crate::models::{App, BackupResponse, RestoreResponse, Snapshot, TaskStatus};
+use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 // Configurable timeouts via environment variables (all in seconds)
 fn backup_timeout_secs() -> u64 {
@@ -534,6 +536,18 @@ impl Kubectl {
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            let last_mover_logs = status
+                .and_then(|s| s.get("latestMoverStatus"))
+                .and_then(|m| m.get("logs"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let repo_locked = last_result.as_deref() == Some("Failed")
+                && last_mover_logs
+                    .as_deref()
+                    .map(|l| l.contains("unable to create lock in backend"))
+                    .unwrap_or(false);
+
             Some(App {
                 name,
                 namespace: namespace_item,
@@ -544,6 +558,7 @@ impl Kubectl {
                 in_progress,
                 paused,
                 repository,
+                repo_locked,
                 backup_pending: false,
                 restore_pending: false,
             })
@@ -1098,6 +1113,21 @@ impl Kubectl {
         }
         tracing::info!("trigger_restore status.lastManualSync reset, waiting for VolSync");
 
+        // Create RestoreGuard to revert state on any error during polling
+        let ks_url = self.kustomization_url(&base_app);
+        let mut guard = RestoreGuard::new(
+            self,
+            ns,
+            &dst_url,
+            &hr_url,
+            &ks_url,
+            original_copy_method.clone(),
+            original_dest_pvc.clone(),
+            original_restore_as_of.clone(),
+            deploys.clone(),
+            replica_map.clone(),
+        );
+
         // Step 6: Poll until restore completes
         let restore_timeout = restore_timeout_secs();
         let poll_interval = polling_interval_secs();
@@ -1137,6 +1167,8 @@ impl Kubectl {
                                 poll_count,
                                 app
                             );
+
+                            guard.disarm();
 
                             // Step 7: Revert RD — restore original copyMethod, destinationPVC, restoreAsOf
                             let mut revert = serde_json::json!({
@@ -1273,6 +1305,274 @@ impl Kubectl {
             }
         }
     }
+
+    pub async fn stream_mover_logs(
+        self: &Arc<Self>,
+        app: String,
+        ns: String,
+        log_type: String,
+    ) -> UnboundedReceiverStream<String> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let me = self.clone();
+        tokio::spawn(async move {
+            let job_name = match log_type.as_str() {
+                "restore" => {
+                    let base = me.dest_crd_name(&app);
+                    format!("volsync-dst-{}", base)
+                }
+                _ => {
+                    format!("volsync-src-{}", app)
+                }
+            };
+
+            let _ = tx.send(
+                serde_json::json!({"status":"waiting","message":"Waiting for mover pod..."})
+                    .to_string(),
+            );
+
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(120);
+            let pod_name = loop {
+                if start.elapsed() > timeout {
+                    let _ = tx.send(
+                        serde_json::json!({"status":"done","result":"failed","error":"Timed out waiting for mover pod"})
+                            .to_string(),
+                    );
+                    return;
+                }
+                match me.find_mover_pod(&job_name, &ns).await {
+                    Some(name) => break name,
+                    None => sleep(Duration::from_secs(2)).await,
+                }
+            };
+
+            let _ = tx.send(serde_json::json!({"status":"streaming"}).to_string());
+
+            let log_url = format!(
+                "/api/v1/namespaces/{}/pods/{}/log?follow=true&tailLines=50",
+                ns, pod_name
+            );
+
+            match me.request_streaming("GET", &log_url, None).await {
+                Ok(resp) => {
+                    let mut stream = resp.bytes_stream();
+                    let mut buffer = String::new();
+
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                let text = String::from_utf8_lossy(&bytes);
+                                buffer.push_str(&text);
+
+                                while let Some(pos) = buffer.find('\n') {
+                                    let line = buffer[..pos].to_string();
+                                    if !line.is_empty() {
+                                        let payload =
+                                            serde_json::json!({"line": line}).to_string();
+                                        if tx.send(payload).is_err() {
+                                            return;
+                                        }
+                                    }
+                                    buffer = buffer[pos + 1..].to_string();
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(
+                                    serde_json::json!({"status":"done","result":"failed","error":e.to_string()})
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        }
+                    }
+
+                    if !buffer.is_empty() {
+                        let _ = tx.send(
+                            serde_json::json!({"line": buffer}).to_string(),
+                        );
+                    }
+
+                    let _ = tx.send(
+                        serde_json::json!({"status":"done","result":"completed"}).to_string(),
+                    );
+                }
+                Err(e) => {
+                    let _ = tx.send(
+                        serde_json::json!({"status":"done","result":"failed","error":e.to_string()})
+                            .to_string(),
+                    );
+                }
+            }
+        });
+
+        UnboundedReceiverStream::new(rx)
+    }
+
+    async fn find_mover_pod(&self, job_name: &str, ns: &str) -> Option<String> {
+        let list_url = format!(
+            "/api/v1/namespaces/{}/pods?labelSelector={}",
+            ns,
+            format!("job-name={}", job_name)
+        );
+
+        match self.request("GET", &list_url, None).await {
+            Ok(resp) => {
+                let items = resp.get("items").and_then(|v| v.as_array())?;
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let name = item.get("metadata")?.get("name")?.as_str()?.to_string();
+                        let created = item
+                            .get("metadata")?
+                            .get("creationTimestamp")?
+                            .as_str()?
+                            .to_string();
+                        Some((name, created))
+                    })
+                    .max_by_key(|(_, created)| created.clone())
+                    .map(|(name, _)| name)
+            }
+            Err(_) => None,
+        }
+    }
+
+    pub async fn trigger_unlock(&self, app: &str, ns: &str) -> Result<String, KubeError> {
+        tracing::info!("trigger_unlock called for app={} namespace={}", app, ns);
+
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| format!("{:x}", d.as_nanos()))
+            .unwrap_or_else(|_| "0".to_string());
+        let pod_name = format!("volsync-unlock-{}-{}", app, unique_id);
+        let pod_url = format!("/api/v1/namespaces/{}/pods/{}", ns, pod_name);
+
+        let rs_url = format!(
+            "/apis/{}/v1alpha1/namespaces/{}/replicationsources/{}",
+            self.api_group, ns, app
+        );
+        let rs: Value = self.request("GET", &rs_url, None).await?;
+        let secret_name = rs
+            .get("spec")
+            .and_then(|s| s.get("restic"))
+            .and_then(|r| r.get("repository"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                KubeError::Api(format!(
+                    "spec.restic.repository not found in ReplicationSource {}/{}",
+                    ns, app
+                ))
+            })?;
+        tracing::debug!("trigger_unlock using secret {} for app={}", secret_name, app);
+
+        let create_url = format!("/api/v1/namespaces/{}/pods", ns);
+        let pod_manifest = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": pod_name, "namespace": ns },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [{
+                    "name": "restic",
+                    "image": std::env::var("RESTIC_IMAGE").unwrap_or_else(|_| "restic/restic:latest".to_string()),
+                    "args": ["unlock"],
+                    "envFrom": [{ "secretRef": { "name": secret_name }}]
+                }]
+            }
+        });
+
+        tracing::debug!("trigger_unlock creating pod {} in namespace {}", pod_name, ns);
+        let _create: Value = self.request("POST", &create_url, Some(pod_manifest)).await?;
+
+        let mut guard = PodGuard::new(self.client.clone(), &self.base_url, self.token.clone(), &pod_url);
+
+        let start = std::time::Instant::now();
+        let mut poll_count = 0;
+        loop {
+            poll_count += 1;
+            if start.elapsed() > Duration::from_secs(pod_startup_timeout_secs()) {
+                tracing::warn!("trigger_unlock pod {} timed out after {} polls", pod_name, poll_count);
+                return Err(KubeError::Timeout("Pod timed out".to_string()));
+            }
+
+            sleep(Duration::from_secs(polling_interval_secs())).await;
+
+            match self.request("GET", &pod_url, None).await {
+                Ok(pod) => {
+                    if let Some(phase) = pod.get("status")
+                        .and_then(|s| s.get("phase"))
+                        .and_then(|v| v.as_str())
+                    {
+                        tracing::debug!("trigger_unlock poll #{}: pod {} phase={}", poll_count, pod_name, phase);
+                        match phase {
+                            "Succeeded" => {
+                                tracing::info!("trigger_unlock pod {} succeeded after {} polls", pod_name, poll_count);
+                                let log_url = format!("/api/v1/namespaces/{}/pods/{}/log", ns, pod_name);
+                                let logs = self.request_text("GET", &log_url, None).await?;
+                                guard.cleanup().await;
+                                let msg = if logs.trim().is_empty() {
+                                    "Repository unlocked successfully".to_string()
+                                } else {
+                                    logs.trim().to_string()
+                                };
+                                return Ok(msg);
+                            }
+                            "Failed" => {
+                                tracing::warn!("trigger_unlock pod {} failed after {} polls", pod_name, poll_count);
+                                let log_url = format!("/api/v1/namespaces/{}/pods/{}/log", ns, pod_name);
+                                let logs = self.request_text("GET", &log_url, None).await.unwrap_or_default();
+                                guard.cleanup().await;
+                                return Err(KubeError::Api(format!(
+                                    "Unlock failed: {}",
+                                    logs.trim()
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("trigger_unlock poll #{}: pod {} not ready yet: {}", poll_count, pod_name, e);
+                }
+            }
+        }
+    }
+
+    async fn request_streaming(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<reqwest::Response, KubeError> {
+        let url = format!("{}{}", self.base_url, path);
+        let method_value = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| KubeError::InvalidMethod(format!("Invalid HTTP method: {}", method)))?;
+
+        let mut req = self.client.request(method_value, &url);
+        if let Some(ref t) = self.token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        if let Some(b) = body {
+            req = req
+                .header("Content-Type", "application/json")
+                .json(&b);
+        }
+
+        let resp = req.send().await.map_err(|e| KubeError::Api(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(KubeError::Api(format!(
+                "HTTP {} on {}: {}",
+                status,
+                path,
+                text
+            )));
+        }
+
+        Ok(resp)
+    }
 }
 
 struct PodGuard {
@@ -1321,6 +1621,157 @@ impl Drop for PodGuard {
             }
             if let Err(e) = req.send().await {
                 tracing::warn!("PodGuard drop cleanup failed: {}", e);
+            }
+        });
+    }
+}
+
+struct RestoreGuard {
+    client: reqwest::Client,
+    base_url: String,
+    token: Option<String>,
+    ns: String,
+    dst_url: String,
+    hr_url: String,
+    ks_url: String,
+    original_copy_method: Option<String>,
+    original_dest_pvc: Option<String>,
+    original_restore_as_of: Option<String>,
+    deploy_names: Vec<String>,
+    replica_map: HashMap<String, i64>,
+    disarmed: bool,
+}
+
+impl RestoreGuard {
+    fn new(
+        kubectl: &Kubectl,
+        ns: &str,
+        dst_url: &str,
+        hr_url: &str,
+        ks_url: &str,
+        original_copy_method: Option<String>,
+        original_dest_pvc: Option<String>,
+        original_restore_as_of: Option<String>,
+        deploy_names: Vec<String>,
+        replica_map: HashMap<String, i64>,
+    ) -> Self {
+        Self {
+            client: kubectl.client.clone(),
+            base_url: kubectl.base_url.clone(),
+            token: kubectl.token.clone(),
+            ns: ns.to_string(),
+            dst_url: dst_url.to_string(),
+            hr_url: hr_url.to_string(),
+            ks_url: ks_url.to_string(),
+            original_copy_method,
+            original_dest_pvc,
+            original_restore_as_of,
+            deploy_names,
+            replica_map,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RestoreGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let token = self.token.clone();
+        let ns = self.ns.clone();
+        let dst_url = self.dst_url.clone();
+        let hr_url = self.hr_url.clone();
+        let ks_url = self.ks_url.clone();
+        let orig_cm = self.original_copy_method.clone();
+        let orig_dp = self.original_dest_pvc.clone();
+        let orig_ra = self.original_restore_as_of.clone();
+        let deploy_names = self.deploy_names.clone();
+        let replica_map = self.replica_map.clone();
+
+        tokio::spawn(async move {
+            tracing::warn!("RestoreGuard: reverting state changes");
+
+            // 1. Revert RD — restore original copyMethod, destinationPVC, restoreAsOf
+            let mut revert = serde_json::json!({
+                "spec": { "restic": {} }
+            });
+            revert["spec"]["restic"]["copyMethod"] = match &orig_cm {
+                Some(m) => serde_json::json!(m),
+                None => serde_json::Value::Null,
+            };
+            revert["spec"]["restic"]["destinationPVC"] = match &orig_dp {
+                Some(p) => serde_json::json!(p),
+                None => serde_json::Value::Null,
+            };
+            revert["spec"]["restic"]["restoreAsOf"] = match &orig_ra {
+                Some(t) => serde_json::json!(t),
+                None => serde_json::Value::Null,
+            };
+
+            let url = format!("{}{}", base_url, dst_url);
+            let mut req = client
+                .request(reqwest::Method::PATCH, &url)
+                .header("Content-Type", "application/merge-patch+json")
+                .json(&revert);
+            if let Some(ref t) = token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            if let Err(e) = req.send().await {
+                tracing::warn!("RestoreGuard: failed to revert RD: {}", e);
+            }
+
+            // 2. Scale deployments back to original replicas
+            for name in &deploy_names {
+                let scale_url = format!(
+                    "/apis/apps/v1/namespaces/{}/deployments/{}/scale",
+                    ns, name
+                );
+                let replicas = replica_map.get(name.as_str()).unwrap_or(&1);
+                let url = format!("{}{}", base_url, scale_url);
+                let mut req = client
+                    .request(reqwest::Method::PATCH, &url)
+                    .header("Content-Type", "application/merge-patch+json")
+                    .json(&serde_json::json!({ "spec": { "replicas": replicas } }));
+                if let Some(ref t) = token {
+                    req = req.header("Authorization", format!("Bearer {}", t));
+                }
+                if let Err(e) = req.send().await {
+                    tracing::warn!("RestoreGuard: failed to scale {}: {}", name, e);
+                }
+            }
+
+            // 3. Unsuspend HelmRelease
+            let url = format!("{}{}", base_url, hr_url);
+            let mut req = client
+                .request(reqwest::Method::PATCH, &url)
+                .header("Content-Type", "application/merge-patch+json")
+                .json(&serde_json::json!({ "spec": { "suspended": false } }));
+            if let Some(ref t) = token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            if let Err(e) = req.send().await {
+                tracing::warn!("RestoreGuard: failed to unsuspend HR: {}", e);
+            }
+
+            // 4. Unsuspend Kustomization (best-effort, may not exist)
+            let url = format!("{}{}", base_url, ks_url);
+            let mut req = client
+                .request(reqwest::Method::PATCH, &url)
+                .header("Content-Type", "application/merge-patch+json")
+                .json(&serde_json::json!({ "spec": { "suspended": false } }));
+            if let Some(ref t) = token {
+                req = req.header("Authorization", format!("Bearer {}", t));
+            }
+            if let Err(e) = req.send().await {
+                tracing::warn!("RestoreGuard: failed to unsuspend Kustomization: {}", e);
             }
         });
     }

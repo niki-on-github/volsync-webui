@@ -8,6 +8,7 @@ export interface App {
   in_progress: boolean;
   paused: boolean;
   repository: string | null;
+  repo_locked: boolean;
   backup_pending: boolean;
   restore_pending: boolean;
 }
@@ -20,6 +21,10 @@ export interface TaskStatus {
   result: string | null;
   error: string | null;
   started_at: string;
+}
+
+export interface UnlockResponse {
+  message: string;
 }
 
 export interface Snapshot {
@@ -37,6 +42,3 @@ export interface Snapshot {
   total_bytes_processed: number;
 }
 
-export interface AppConfig {
-  refresh_interval_secs: number;
-}

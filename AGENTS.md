@@ -85,6 +85,8 @@ cargo fmt
 | `/apis/volsync.backube/v1alpha1/replicationdestinations` | VolSync destinations |
 | `/apis/helm.toolkit.fluxcd.io/v2/helmreleases` | Flux HelmReleases |
 | `/apis/apps/v1/deployments` | Deployments |
+| `/api/apps/{app}/{ns}/mover-logs?type=backup\|restore` | SSE stream of mover pod logs |
+| `POST /api/apps/{app}/{ns}/unlock` | Run `restic unlock` on the repository |
 
 ## Docker Build
 

@@ -2,7 +2,7 @@ mod api;
 mod kubectl;
 mod models;
 
-use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_restore, get_config, get_dest_repository, get_backup_status, get_restore_status};
+use api::{health, list_apps, list_namespaces, get_snapshots, trigger_backup, trigger_restore, get_dest_repository, get_backup_status, get_restore_status, stream_mover_logs, trigger_unlock};
 use std::sync::Arc;
 use axum::{Router, extract::Request, response::Response, body::Body};
 use tower_http::cors::{Any, CorsLayer};
@@ -16,8 +16,12 @@ async fn serve_static(req: Request) -> Response {
     tracing::debug!("Serving static file: {}", path);
 
     // Normalize path: strip leading slash and prevent directory traversal
-    let clean = path.trim_start_matches('/').replace("..", "");
-    if clean.is_empty() || clean.contains("..") {
+    if path.contains("..") {
+        tracing::debug!("Path containing '..' rejected: {}", path);
+        return serve_index().await;
+    }
+    let clean = path.trim_start_matches('/');
+    if clean.is_empty() {
         tracing::debug!("Fallback to index.html (empty or invalid path)");
         return serve_index().await;
     }
@@ -102,7 +106,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", axum::routing::get(health))
-        .route("/api/config", axum::routing::get(get_config))
         .route("/api/namespaces", axum::routing::get(list_namespaces))
         .route("/api/apps", axum::routing::get(list_apps))
         .route("/api/apps/:app/:ns/snapshots", axum::routing::get(get_snapshots))
@@ -111,6 +114,8 @@ async fn main() {
         .route("/api/apps/:app/:ns/backup/status", axum::routing::get(get_backup_status))
         .route("/api/apps/:app/:ns/restore/status", axum::routing::get(get_restore_status))
         .route("/api/apps/:app/:ns/destination/repository", axum::routing::get(get_dest_repository))
+        .route("/api/apps/:app/:ns/mover-logs", axum::routing::get(stream_mover_logs))
+        .route("/api/apps/:app/:ns/unlock", axum::routing::post(trigger_unlock))
         .fallback(axum::routing::get(serve_static))
         .with_state(kubectl)
         .layer(cors);

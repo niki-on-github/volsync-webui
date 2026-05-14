@@ -3,7 +3,6 @@
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| GET | `/api/config` | Frontend configuration (`{ refresh_interval_secs }`) |
 | GET | `/api/namespaces` | List all namespaces |
 | GET | `/api/apps` | List all ReplicationSources with full status |
 | GET | `/api/apps/:app/:ns/snapshots` | Get snapshots for an app |

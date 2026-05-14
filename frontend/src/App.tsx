@@ -1,18 +1,17 @@
 import { useEffect, useState, useRef } from "react";
 import { api } from "@/api";
-import type { App, AppConfig } from "@/types";
+import type { App } from "@/types";
 import { AppsTable } from "@/components/apps-table";
 import { AppDetail } from "@/components/app-detail";
 
 export default function App() {
   const [apps, setApps] = useState<App[]>([]);
   const [selectedApp, setSelectedApp] = useState<App | null>(null);
-  const [config, setConfig] = useState<AppConfig>({ refresh_interval_secs: 3600 });
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshingRef = useRef(false);
 
-  const loadApps = async () => {
+  const loadApps = async (): Promise<App[] | undefined> => {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setRefreshing(true);
@@ -25,11 +24,26 @@ export default function App() {
         return updated ?? prev;
       });
       setError(null);
+      return a;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
+    }
+  };
+
+  const handleSelectApp = async (app: App | null) => {
+    if (!app) {
+      setSelectedApp(null);
+      return;
+    }
+    const fresh = await loadApps();
+    if (fresh) {
+      const match = fresh.find(x => x.name === app.name && x.namespace === app.namespace);
+      setSelectedApp(match ?? app);
+    } else {
+      setSelectedApp(app);
     }
   };
 
@@ -41,19 +55,10 @@ export default function App() {
     await loadApps();
   };
 
-  // Initial fetch: config + apps
+  // Initial fetch
   useEffect(() => {
-    api.getConfig()
-      .then(setConfig)
-      .catch(() => {});
     loadApps();
   }, []);
-
-  // Periodic refresh
-  useEffect(() => {
-    const interval = setInterval(loadApps, config.refresh_interval_secs * 1000);
-    return () => clearInterval(interval);
-  }, [config.refresh_interval_secs]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -77,7 +82,7 @@ export default function App() {
             <AppsTable
               apps={apps}
               selectedApp={selectedApp}
-              onSelect={setSelectedApp}
+              onSelect={handleSelectApp}
               refreshing={refreshing}
               onRefresh={loadApps}
             />

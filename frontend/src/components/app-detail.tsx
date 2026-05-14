@@ -4,6 +4,8 @@ import type { App, Snapshot } from "@/types";
 import { formatDateTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { LogStream } from "@/components/log-stream";
 import {
   AlertDialog,
   AlertDialogTrigger,
@@ -38,6 +40,7 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  Unlock,
 } from "lucide-react";
 
 interface Props {
@@ -103,6 +106,10 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
   const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
   const [destRepo, setDestRepo] = useState<string | null>(null);
   const [destLoaded, setDestLoaded] = useState(false);
+  const [backupLogsOpen, setBackupLogsOpen] = useState(false);
+  const [restoreLogsOpen, setRestoreLogsOpen] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockStatus, setUnlockStatus] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
@@ -259,8 +266,30 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
     }
   };
 
+  useEffect(() => {
+    if (backingUp) setBackupLogsOpen(true);
+  }, [backingUp]);
+
+  useEffect(() => {
+    if (restoring) setRestoreLogsOpen(true);
+  }, [restoring]);
+
   const backupLocked = backingUp || app.backup_pending || restoring || app.restore_pending;
   const restoreLocked = restoring || app.restore_pending || app.backup_pending;
+
+  const handleUnlock = async () => {
+    if (unlocking) return;
+    setUnlocking(true);
+    setUnlockStatus("Starting unlock...");
+    try {
+      const resp = await api.triggerUnlock(app.name, app.namespace);
+      setUnlockStatus(resp.message);
+    } catch (e) {
+      setUnlockStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUnlocking(false);
+    }
+  };
 
   return (
     <Card>
@@ -307,6 +336,15 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
             <div className="text-muted-foreground">Repository:</div>
             <div className="font-mono text-xs">{app.repository ?? "-"}</div>
           </div>
+          {app.repo_locked && (
+            <div className="rounded-md bg-amber-500/10 border border-amber-500/30 p-3 text-sm">
+              <strong className="text-amber-500">Repository is locked</strong>
+              <p className="text-muted-foreground mt-1">
+                The last backup failed because the repository is locked.
+                Use the <strong className="text-amber-500">Unlock Repository</strong> button below to remove stale locks.
+              </p>
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <Button onClick={handleBackup} disabled={backupLocked} size="sm">
               <Play className="mr-1 h-4 w-4" />
@@ -316,6 +354,21 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
               <span className="text-sm text-muted-foreground">{backupStatus}</span>
             )}
           </div>
+          <Collapsible open={backupLogsOpen} onOpenChange={setBackupLogsOpen}>
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm" className="mt-1 h-7 px-2">
+                {backupLogsOpen ? "▲" : "▼"} Mover Logs
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <LogStream
+                app={app.name}
+                namespace={app.namespace}
+                logType="backup"
+                active={backingUp}
+              />
+            </CollapsibleContent>
+          </Collapsible>
         </Section>
 
         {/* ── Snapshots Section ── */}
@@ -429,6 +482,21 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
               </span>
             )}
           </div>
+          <Collapsible open={restoreLogsOpen} onOpenChange={setRestoreLogsOpen}>
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm" className="mt-1 h-7 px-2">
+                {restoreLogsOpen ? "▲" : "▼"} Mover Logs
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <LogStream
+                app={app.name}
+                namespace={app.namespace}
+                logType="restore"
+                active={restoring}
+              />
+            </CollapsibleContent>
+          </Collapsible>
           {destLoaded && (
             <div className="grid grid-cols-2 gap-2 text-sm mt-3">
               <div className="text-muted-foreground">Repository:</div>
@@ -436,6 +504,35 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
             </div>
           )}
         </Section>
+
+        {/* ── Unlock Section ── */}
+        <div className="border-t border-border pt-3">
+          <div className="flex items-center gap-3">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button disabled={unlocking} size="sm" variant="outline">
+                  <Unlock className="mr-1 h-4 w-4" />
+                  {unlocking ? "Unlocking..." : "Unlock Repository"}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Confirm Unlock</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Do you really want to unlock the repository <strong>{app.name}</strong>?
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>No</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleUnlock}>Yes</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+            {unlockStatus && (
+              <span className="text-sm text-muted-foreground">{unlockStatus}</span>
+            )}
+          </div>
+        </div>
 
       </CardContent>
     </Card>
