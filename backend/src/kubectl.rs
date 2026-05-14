@@ -1,5 +1,4 @@
 use crate::models::{App, BackupResponse, RestoreResponse, Snapshot, TaskStatus};
-use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1350,59 +1349,73 @@ impl Kubectl {
             let _ = tx.send(serde_json::json!({"status":"streaming"}).to_string());
 
             let log_url = format!(
-                "/api/v1/namespaces/{}/pods/{}/log?follow=true&tailLines=50",
+                "/api/v1/namespaces/{}/pods/{}/log?tailLines=50",
                 ns, pod_name
             );
+            let pod_url = format!("/api/v1/namespaces/{}/pods/{}", ns, pod_name);
+            let mut prev_len = 0usize;
+            let stream_start = std::time::Instant::now();
+            let stream_timeout = Duration::from_secs(1800);
 
-            match me.request_streaming("GET", &log_url, None).await {
-                Ok(resp) => {
-                    let mut stream = resp.bytes_stream();
-                    let mut buffer = String::new();
+            loop {
+                if stream_start.elapsed() > stream_timeout {
+                    let _ = tx.send(
+                        serde_json::json!({"status":"done","result":"failed","error":"Log stream timed out"})
+                            .to_string(),
+                    );
+                    return;
+                }
 
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                buffer.push_str(&text);
+                let phase = match me.request("GET", &pod_url, None).await {
+                    Ok(pod) => pod.get("status")
+                        .and_then(|s| s.get("phase"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    Err(KubeError::NotFound(_)) => {
+                        let _ = tx.send(
+                            serde_json::json!({"status":"done","result":"completed"}).to_string(),
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(
+                            serde_json::json!({"status":"done","result":"failed","error":e.to_string()})
+                                .to_string(),
+                        );
+                        return;
+                    }
+                };
 
-                                while let Some(pos) = buffer.find('\n') {
-                                    let line = buffer[..pos].to_string();
-                                    if !line.is_empty() {
-                                        let payload =
-                                            serde_json::json!({"line": line}).to_string();
-                                        if tx.send(payload).is_err() {
-                                            return;
-                                        }
-                                    }
-                                    buffer = buffer[pos + 1..].to_string();
+                if let Ok(logs) = me.request_text("GET", &log_url, None).await {
+                    if logs.len() > prev_len {
+                        let new_text = &logs[prev_len..];
+                        for line in new_text.lines() {
+                            if !line.is_empty() {
+                                let payload = serde_json::json!({"line": line}).to_string();
+                                if tx.send(payload).is_err() {
+                                    return;
                                 }
                             }
-                            Err(e) => {
-                                let _ = tx.send(
-                                    serde_json::json!({"status":"done","result":"failed","error":e.to_string()})
-                                        .to_string(),
-                                );
-                                return;
-                            }
                         }
+                        prev_len = logs.len();
                     }
-
-                    if !buffer.is_empty() {
-                        let _ = tx.send(
-                            serde_json::json!({"line": buffer}).to_string(),
-                        );
-                    }
-
+                } else if phase != "Running" && phase != "Pending" {
                     let _ = tx.send(
                         serde_json::json!({"status":"done","result":"completed"}).to_string(),
                     );
+                    return;
                 }
-                Err(e) => {
+
+                if phase == "Succeeded" || phase == "Failed" {
+                    let result = if phase == "Succeeded" { "completed" } else { "failed" };
                     let _ = tx.send(
-                        serde_json::json!({"status":"done","result":"failed","error":e.to_string()})
-                            .to_string(),
+                        serde_json::json!({"status":"done","result":result}).to_string(),
                     );
+                    return;
                 }
+
+                sleep(Duration::from_secs(2)).await;
             }
         });
 
@@ -1538,41 +1551,6 @@ impl Kubectl {
         }
     }
 
-    async fn request_streaming(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<Value>,
-    ) -> Result<reqwest::Response, KubeError> {
-        let url = format!("{}{}", self.base_url, path);
-        let method_value = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| KubeError::InvalidMethod(format!("Invalid HTTP method: {}", method)))?;
-
-        let mut req = self.client.request(method_value, &url);
-        if let Some(ref t) = self.token {
-            req = req.header("Authorization", format!("Bearer {}", t));
-        }
-        if let Some(b) = body {
-            req = req
-                .header("Content-Type", "application/json")
-                .json(&b);
-        }
-
-        let resp = req.send().await.map_err(|e| KubeError::Api(e.to_string()))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(KubeError::Api(format!(
-                "HTTP {} on {}: {}",
-                status,
-                path,
-                text
-            )));
-        }
-
-        Ok(resp)
-    }
 }
 
 struct PodGuard {

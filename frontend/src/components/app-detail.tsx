@@ -354,6 +354,31 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
               <span className="text-sm text-muted-foreground">{backupStatus}</span>
             )}
           </div>
+          <div className="flex items-center gap-3 mt-2">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button disabled={unlocking} size="sm" variant="destructive">
+                  <Unlock className="mr-1 h-4 w-4" />
+                  {unlocking ? "Unlocking..." : "Unlock Repository"}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Confirm Unlock</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Do you really want to unlock the repository <strong>{app.name}</strong>?
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>No</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleUnlock}>Yes</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+            {unlockStatus && (
+              <span className="text-sm text-muted-foreground">{unlockStatus}</span>
+            )}
+          </div>
           <Collapsible open={backupLogsOpen} onOpenChange={setBackupLogsOpen}>
             <CollapsibleTrigger asChild>
               <Button variant="ghost" size="sm" className="mt-1 h-7 px-2">
@@ -504,35 +529,6 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
             </div>
           )}
         </Section>
-
-        {/* ── Unlock Section ── */}
-        <div className="border-t border-border pt-3">
-          <div className="flex items-center gap-3">
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button disabled={unlocking} size="sm" variant="outline">
-                  <Unlock className="mr-1 h-4 w-4" />
-                  {unlocking ? "Unlocking..." : "Unlock Repository"}
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Confirm Unlock</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Do you really want to unlock the repository <strong>{app.name}</strong>?
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>No</AlertDialogCancel>
-                  <AlertDialogAction onClick={handleUnlock}>Yes</AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-            {unlockStatus && (
-              <span className="text-sm text-muted-foreground">{unlockStatus}</span>
-            )}
-          </div>
-        </div>
 
       </CardContent>
     </Card>
