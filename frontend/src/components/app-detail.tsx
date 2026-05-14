@@ -451,6 +451,18 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
         <Section title={
           <><RotateCcw className="h-4 w-4" /> Restore</>
         }>
+          {destLoaded && (
+            <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+              <div className="text-muted-foreground">Repository:</div>
+              <div className="font-mono text-xs">{destRepo ?? "none"}</div>
+              {selectedSnap && (
+                <>
+                  <div className="text-muted-foreground">Selected snapshot:</div>
+                  <div className="font-mono text-xs">{selectedSnap.short_id} — {formatDateTime(selectedSnap.time)}</div>
+                </>
+              )}
+            </div>
+          )}
           <div className="mb-3">
             <label className="block text-sm text-muted-foreground mb-1">
               Select snapshot to restore from
@@ -522,12 +534,6 @@ export function AppDetail({ app, onBackupComplete, onRestoreComplete }: Props) {
               />
             </CollapsibleContent>
           </Collapsible>
-          {destLoaded && (
-            <div className="grid grid-cols-2 gap-2 text-sm mt-3">
-              <div className="text-muted-foreground">Repository:</div>
-              <div className="font-mono text-xs">{destRepo ?? "none"}</div>
-            </div>
-          )}
         </Section>
 
       </CardContent>
