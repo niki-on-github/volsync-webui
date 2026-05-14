@@ -98,6 +98,10 @@ export function LogStream({ app, namespace, logType, active }: Props) {
   }, [app, namespace, logType, active]);
 
   useEffect(() => {
+    clear();
+  }, [app, namespace, logType]);
+
+  useEffect(() => {
     if (autoScroll && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
