@@ -16,75 +16,6 @@ A web-based management interface for VolSync replication and backup operations o
 - **Auto-Refresh**: Periodically updates the app list with configurable interval (default: 1 hour, no-overlap guard)
 - **Manual Refresh**: Refresh button in header to fetch latest data on demand
 
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check |
-| GET | `/api/config` | Frontend configuration (`{ refresh_interval_secs }`) |
-| GET | `/api/namespaces` | List all namespaces |
-| GET | `/api/apps` | List all ReplicationSources with full status |
-| GET | `/api/apps/:app/:ns/snapshots` | Get snapshots for an app |
-| POST | `/api/apps/:app/:ns/backup` | Trigger backup for app |
-| POST | `/api/apps/:app/:ns/restore` | Trigger restore for app |
-| POST | `/api/apps/backup-all` | Trigger backup for all apps |
-
-### App Response Fields
-
-The `/api/apps` endpoint returns extended status information for each ReplicationSource:
-
-| Field | Type | Source |
-|-------|------|--------|
-| `name` | string | `metadata.name` |
-| `namespace` | string | `metadata.namespace` |
-| `last_sync_time` | string\|null | `status.lastSyncTime` |
-| `last_sync_duration` | string\|null | `status.lastSyncDuration` (formatted as `{n.n}s`) |
-| `last_result` | string\|null | `status.latestMoverStatus.result` |
-| `next_sync_time` | string\|null | `status.nextSyncTime` |
-| `in_progress` | bool | `status.conditions[].type == "Synchronizing" && status == "True"` |
-| `paused` | bool | `spec.paused` |
-
-## Development
-
-### Prerequisites
-
-- Nix (for development shelll)
-
-### Nix Dev Shell
-
-```bash
-cd volsync-webui
-nix develop --accept-flake-config
-```
-
-### Build Commands
-
-```bash
-# Backend
-cargo check -p volsync-webui-backend
-cargo build -p volsync-webui-backend
-
-# Frontend
-cd frontend && npm install && npx tsc -b && npx vite build
-
-# Format code
-cargo fmt
-```
-
-### Frontend Dev Server
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The Vite dev server runs on `http://localhost:5173` and proxies API calls to the backend running on port 8080. Make sure the backend is running separately:
-
-```bash
-cargo run -p volsync-webui-backend
-```
-
 ## Deployment
 
 A example deployment of this repository is in the `./example/` direcotry.
@@ -240,6 +171,10 @@ env:
 3. **No TLS**: Backend runs HTTP; TLS should be handled by ingress/controller
 4. **No Authentication**: Currently no auth — expose via auth proxy (e.g., OAuth2 proxy) in production
 5. **Secret Access**: Reads the actual secret name from `spec.restic.repository` on each ReplicationSource at snapshot time, so it always uses the correct credentials regardless of naming convention
+
+## Developer Documentation
+
+see `./docs`
 
 ## License
 
