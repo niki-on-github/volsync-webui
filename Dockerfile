@@ -44,6 +44,6 @@ COPY --from=builder /app/frontend/dist /app/public
 
 EXPOSE 8080
 
-ENV RUST_LOG=debug
+ENV RUST_LOG=info
 
 ENTRYPOINT ["/app/volsync-webui"]

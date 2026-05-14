@@ -2,6 +2,9 @@
 
 A web-based management interface for VolSync replication and backup operations on Kubernetes.
 
+> [!WARNING]  
+> The code was specificaly designed for my k8s setup. It is not a universal tool that covers every situation. If you would like to use this project, please review the conditions carefully or create a fork with the necessary modifications.
+
 ![Screenshot](preview.png)
 
 ## Features
@@ -130,7 +133,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["kustomize.toolkit.fluxcd.io"]
     resources: ["kustomizations"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "patch", "list"]
 ```
 
 The app runs a startup RBAC check that probes each API endpoint and logs whether permissions are present. Missing permissions are non-fatal (logged as errors but the app continues).
@@ -139,7 +142,7 @@ The app runs a startup RBAC check that probes each API endpoint and logs whether
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUST_LOG` | `debug` | Logging level (trace, debug, info, warn, error) |
+| `RUST_LOG` | `info` | Logging level (trace, debug, info, warn, error) |
 | `KUBERNETES_SERVICE_HOST` | auto-detected | Kubernetes API server host |
 | `VOLSYNC_API_GROUP` | `volsync.backube` | API group for VolSync CRDs (set to `replication.storage.io` for older clusters) |
 | `VOLSYNC_SOURCE_SUFFIX` | `-backup` | Suffix on ReplicationSource CRD names (e.g. `gitea-backup`) |
